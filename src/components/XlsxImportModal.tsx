@@ -85,6 +85,7 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
     const worksheet = workbook.Sheets[firstSheetName];
     const rows = XLSX.utils.sheet_to_json<string[]>(worksheet, {
       header: 1,
+      raw: false,
       defval: '',
     });
     setRawRows(rows);
@@ -112,57 +113,92 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
     XLSX.writeFile(wb, 'modelo-estoque-validamerc.xlsx');
   };
 
+  const [importProgress, setImportProgress] = useState<{
+    current: number;
+    total: number;
+    percent: number;
+  } | null>(null);
+
   const handleConfirmImport = async () => {
     if (exceedsMaxRows) {
       setResultMsg({
         ok: false,
-        text: `O teto máximo por importação é de ${MAX_IMPORT_ROWS} linhas. Ajuste a linha inicial ou final.`,
+        text: `O teto máximo por importação é de ${MAX_IMPORT_ROWS} linhas. Ajuste o intervalo de linhas.`,
       });
       return;
     }
-    if (mappedItems.length === 0) return;
+    if (mappedItems.length === 0) {
+      setResultMsg({
+        ok: false,
+        text: 'Nenhum produto válido encontrado no intervalo de linhas e colunas selecionado.',
+      });
+      return;
+    }
+
     setImporting(true);
     setResultMsg(null);
-    try {
-      const res = await fetch('/api/products/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: mappedItems }),
-      });
-      const rawText = await res.text();
-      let data: {
-        inserted?: number;
-        updated?: number;
-        supabaseSynced?: boolean;
-        error?: string;
-      } = {};
-      try {
-        data = JSON.parse(rawText);
-      } catch {
-        setResultMsg({
-          ok: false,
-          text: `O servidor retornou uma resposta inesperada (HTTP ${res.status}). Tente um intervalo menor de linhas.`,
-        });
-        return;
-      }
+    setImportProgress({ current: 0, total: mappedItems.length, percent: 0 });
 
-      if (!res.ok) {
-        setResultMsg({ ok: false, text: data.error || 'Erro ao importar planilha.' });
-        return;
+    try {
+      const CHUNK_SIZE = 100;
+      let totalInserted = 0;
+      let totalUpdated = 0;
+      let anySupabaseSynced = false;
+
+      for (let i = 0; i < mappedItems.length; i += CHUNK_SIZE) {
+        const chunk = mappedItems.slice(i, i + CHUNK_SIZE);
+        const res = await fetch('/api/products/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: chunk }),
+        });
+
+        const rawText = await res.text();
+        let data: {
+          ok?: boolean;
+          inserted?: number;
+          updated?: number;
+          supabaseSynced?: boolean;
+          error?: string;
+        } = {};
+
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          throw new Error(
+            `O servidor retornou uma resposta não-JSON (HTTP ${res.status}). O lote a partir do item ${i + 1} foi interrompido.`
+          );
+        }
+
+        if (!res.ok || data.ok === false) {
+          throw new Error(data.error || `Erro no processamento do lote (HTTP ${res.status})`);
+        }
+
+        totalInserted += Number(data.inserted || 0);
+        totalUpdated += Number(data.updated || 0);
+        if (data.supabaseSynced) anySupabaseSynced = true;
+
+        const currentCount = Math.min(i + chunk.length, mappedItems.length);
+        const percent = Math.round((currentCount / mappedItems.length) * 100);
+        setImportProgress({ current: currentCount, total: mappedItems.length, percent });
       }
 
       await onImported();
       setResultMsg({
         ok: true,
-        text: `Importação concluída (linhas ${startRow} a ${endRow}): ${data.inserted} novo(s) e ${data.updated} atualizado(s)${
-          data.supabaseSynced ? ' (sincronizado com Supabase)' : ''
+        text: `Importação concluída com sucesso! ${totalInserted} novo(s) e ${totalUpdated} atualizado(s) no estoque${
+          anySupabaseSynced ? ' (sincronizado com Supabase)' : ''
         }.`,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Erro desconhecido';
-      setResultMsg({ ok: false, text: `Falha ao importar planilha: ${msg}` });
+      const msg = err instanceof Error ? err.message : 'Falha desconhecida na conexão';
+      setResultMsg({
+        ok: false,
+        text: `Falha na importação: ${msg}`,
+      });
     } finally {
       setImporting(false);
+      setImportProgress(null);
     }
   };
 
@@ -435,6 +471,21 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          )}
+
+          {importProgress && (
+            <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/70 dark:bg-emerald-950/40 p-4 space-y-2">
+              <div className="flex items-center justify-between text-xs font-semibold text-emerald-900 dark:text-emerald-100">
+                <span>Gravando no banco de dados em lotes...</span>
+                <span className="font-mono tabular-nums">{importProgress.percent}% ({importProgress.current}/{importProgress.total})</span>
+              </div>
+              <div className="w-full h-2.5 rounded-full bg-emerald-200 dark:bg-emerald-900/60 overflow-hidden">
+                <div
+                  className="h-full bg-emerald-600 rounded-full transition-all duration-150"
+                  style={{ width: `${importProgress.percent}%` }}
+                />
               </div>
             </div>
           )}

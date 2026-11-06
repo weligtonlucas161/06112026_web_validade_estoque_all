@@ -472,159 +472,169 @@ async function startServer() {
     res.status(201).json(newProduct);
   });
 
-  // Bulk Import from .xlsx spreadsheet
+  // Bulk Import from .xlsx spreadsheet (Robust chunk-friendly endpoint)
   app.post('/api/products/import', async (req, res) => {
-    store = loadStore();
-    const { items } = req.body as {
-      items?: Array<{
-        name?: string;
-        supplierCode?: string;
-        barcode?: string;
-        reducedCode?: string;
-        quantity?: number;
-      }>;
-    };
+    try {
+      store = loadStore();
+      const { items } = req.body as {
+        items?: Array<{
+          name?: string;
+          supplierCode?: string;
+          barcode?: string;
+          reducedCode?: string;
+          quantity?: number;
+        }>;
+      };
 
-    if (!Array.isArray(items) || items.length === 0) {
-      res.status(400).json({ error: 'Nenhum item válido enviado para importação.' });
-      return;
-    }
+      if (!Array.isArray(items) || items.length === 0) {
+        res.status(400).json({ ok: false, error: 'Nenhum item válido enviado para importação.' });
+        return;
+      }
 
-    if (items.length > 5000) {
-      res.status(400).json({
-        error: 'O teto máximo por importação é de 5.000 linhas. Reduza o intervalo de linhas.',
+      if (items.length > 5000) {
+        res.status(400).json({
+          ok: false,
+          error: 'O teto máximo por lote de importação é de 5.000 linhas.',
+        });
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const defaultExpiry = addDaysISO(30);
+      let inserted = 0;
+      let updated = 0;
+      const affectedProducts: ProductBatch[] = [];
+      const newProducts: ProductBatch[] = [];
+
+      const barcodeIndex = new Map<string, number>();
+      const reducedIndex = new Map<string, number>();
+      store.products.forEach((p, idx) => {
+        if (p.barcode) barcodeIndex.set(p.barcode, idx);
+        if (p.reducedCode) reducedIndex.set(p.reducedCode, idx);
       });
-      return;
-    }
 
-    const now = new Date().toISOString();
-    const defaultExpiry = addDaysISO(30);
-    let inserted = 0;
-    let updated = 0;
-    const affectedProducts: ProductBatch[] = [];
-    const newProducts: ProductBatch[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const row = items[i];
+        if (!row) continue;
+        const name = String(row.name || '').trim();
+        const barcode = String(row.barcode || '').trim();
+        const reducedCode = String(row.reducedCode || '').trim();
+        const supplierCode = String(row.supplierCode || '').trim();
+        const quantity = Number(row.quantity ?? 0) || 0;
 
-    const barcodeIndex = new Map<string, number>();
-    const reducedIndex = new Map<string, number>();
-    store.products.forEach((p, idx) => {
-      if (p.barcode) barcodeIndex.set(p.barcode, idx);
-      if (p.reducedCode) reducedIndex.set(p.reducedCode, idx);
-    });
+        if (!name && !barcode && !reducedCode) continue;
 
-    for (let i = 0; i < items.length; i++) {
-      const row = items[i];
-      const name = String(row.name || '').trim();
-      const barcode = String(row.barcode || '').trim();
-      const reducedCode = String(row.reducedCode || '').trim();
-      const supplierCode = String(row.supplierCode || '').trim();
-      const quantity = Number(row.quantity ?? 0) || 0;
+        let existingIdx = -1;
+        if (barcode && barcodeIndex.has(barcode)) {
+          existingIdx = barcodeIndex.get(barcode)!;
+        } else if (reducedCode && reducedIndex.has(reducedCode)) {
+          existingIdx = reducedIndex.get(reducedCode)!;
+        }
 
-      if (!name && !barcode && !reducedCode) continue;
-
-      let existingIdx = -1;
-      if (barcode && barcodeIndex.has(barcode)) {
-        existingIdx = barcodeIndex.get(barcode)!;
-      } else if (reducedCode && reducedIndex.has(reducedCode)) {
-        existingIdx = reducedIndex.get(reducedCode)!;
+        if (existingIdx !== -1) {
+          store.products[existingIdx] = {
+            ...store.products[existingIdx],
+            name: name || store.products[existingIdx].name,
+            barcode: barcode || store.products[existingIdx].barcode,
+            reducedCode: reducedCode || store.products[existingIdx].reducedCode,
+            supplierCode: supplierCode || store.products[existingIdx].supplierCode,
+            quantity,
+            presenceStatus: quantity > 0 ? 'presente' : 'ruptura',
+            lastAuditedAt: now,
+          };
+          updated++;
+          affectedProducts.push(store.products[existingIdx]);
+        } else {
+          const created: ProductBatch = {
+            id: `prod-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+            reducedCode: reducedCode || undefined,
+            barcode: barcode || reducedCode || `IMP-${Date.now()}-${i}`,
+            name: name || `Produto ${reducedCode || barcode}`,
+            brand: 'Importado',
+            category: 'Mercearia',
+            location: 'Estoque Geral',
+            supplier: supplierCode ? `Fornecedor ${supplierCode}` : 'Fornecedor Padrão',
+            supplierCode: supplierCode || undefined,
+            batchCode: `LT-${Math.floor(1000 + Math.random() * 9000)}`,
+            quantity,
+            unit: 'un',
+            unitPrice: 0,
+            expirationDate: defaultExpiry,
+            status: 'ativo',
+            presenceStatus: quantity > 0 ? 'presente' : 'ruptura',
+            lastAuditedAt: now,
+            createdAt: now,
+          };
+          newProducts.push(created);
+          inserted++;
+          affectedProducts.push(created);
+        }
       }
 
-      if (existingIdx !== -1) {
-        store.products[existingIdx] = {
-          ...store.products[existingIdx],
-          name: name || store.products[existingIdx].name,
-          barcode: barcode || store.products[existingIdx].barcode,
-          reducedCode: reducedCode || store.products[existingIdx].reducedCode,
-          supplierCode: supplierCode || store.products[existingIdx].supplierCode,
-          quantity,
-          presenceStatus: quantity > 0 ? 'presente' : 'ruptura',
-          lastAuditedAt: now,
-        };
-        updated++;
-        affectedProducts.push(store.products[existingIdx]);
-      } else {
-        const created: ProductBatch = {
-          id: `prod-${Date.now()}-${i}`,
-          reducedCode: reducedCode || undefined,
-          barcode: barcode || reducedCode || `IMP-${Date.now()}-${i}`,
-          name: name || `Produto ${reducedCode || barcode}`,
-          brand: 'Importado',
-          category: 'Mercearia',
-          location: 'Estoque Geral',
-          supplier: supplierCode ? `Fornecedor ${supplierCode}` : 'Fornecedor Padrão',
-          supplierCode: supplierCode || undefined,
-          batchCode: `LT-${Math.floor(1000 + Math.random() * 9000)}`,
-          quantity,
-          unit: 'un',
-          unitPrice: 0,
-          expirationDate: defaultExpiry,
-          status: 'ativo',
-          presenceStatus: quantity > 0 ? 'presente' : 'ruptura',
-          lastAuditedAt: now,
-          createdAt: now,
-        };
-        newProducts.push(created);
-        inserted++;
-        affectedProducts.push(created);
+      if (newProducts.length > 0) {
+        store.products = [...newProducts, ...store.products];
       }
-    }
 
-    if (newProducts.length > 0) {
-      store.products = [...newProducts, ...store.products];
-    }
+      saveStore(store);
 
-    saveStore(store);
+      // Sincronização segura com Supabase em segundo plano se configurado
+      let supabaseSynced = false;
+      const { raw } = getEffectiveIntegrations();
+      if (raw.supabaseUrl && raw.supabaseKey && affectedProducts.length > 0) {
+        try {
+          const sbPayload = affectedProducts.slice(0, 500).map((p) => ({
+            id: p.id,
+            reduced_code: p.reducedCode || null,
+            barcode: p.barcode,
+            name: p.name,
+            supplier_code: p.supplierCode || null,
+            supplier: p.supplier,
+            brand: p.brand,
+            category: p.category,
+            location: p.location,
+            batch_code: p.batchCode,
+            quantity: p.quantity,
+            unit: p.unit,
+            unit_price: p.unitPrice,
+            expiration_date: p.expirationDate,
+            status: p.status,
+            presence_status: p.presenceStatus,
+            updated_at: now,
+          }));
 
-    // Optional automatic sync to Supabase if configured
-    let supabaseSynced = false;
-    const { raw } = getEffectiveIntegrations();
-    if (raw.supabaseUrl && raw.supabaseKey && affectedProducts.length > 0) {
-      try {
-        const sbPayload = affectedProducts.map((p) => ({
-          id: p.id,
-          reduced_code: p.reducedCode || null,
-          barcode: p.barcode,
-          name: p.name,
-          supplier_code: p.supplierCode || null,
-          supplier: p.supplier,
-          brand: p.brand,
-          category: p.category,
-          location: p.location,
-          batch_code: p.batchCode,
-          quantity: p.quantity,
-          unit: p.unit,
-          unit_price: p.unitPrice,
-          expiration_date: p.expirationDate,
-          status: p.status,
-          presence_status: p.presenceStatus,
-          updated_at: now,
-        }));
-        const sbRes = await fetch(
-          `${raw.supabaseUrl}/rest/v1/validamerc_products?on_conflict=id`,
-          {
-            method: 'POST',
-            headers: {
-              apikey: raw.supabaseKey,
-              Authorization: `Bearer ${raw.supabaseKey}`,
-              'Content-Type': 'application/json',
-              Prefer: 'resolution=merge-duplicates',
-            },
-            body: JSON.stringify(sbPayload),
-            signal: AbortSignal.timeout(8000),
-          }
-        );
-        supabaseSynced = sbRes.ok;
-      } catch {
-        // Keep local import successful even if Supabase is unreachable
+          const sbRes = await fetch(
+            `${raw.supabaseUrl}/rest/v1/validamerc_products?on_conflict=id`,
+            {
+              method: 'POST',
+              headers: {
+                apikey: raw.supabaseKey,
+                Authorization: `Bearer ${raw.supabaseKey}`,
+                'Content-Type': 'application/json',
+                Prefer: 'resolution=merge-duplicates',
+              },
+              body: JSON.stringify(sbPayload),
+              signal: AbortSignal.timeout(5000),
+            }
+          );
+          supabaseSynced = sbRes.ok;
+        } catch {
+          // Mantém sucesso da importação mesmo se Supabase estiver inacessível
+          supabaseSynced = false;
+        }
       }
-    }
 
-    res.status(201).json({
-      ok: true,
-      inserted,
-      updated,
-      total: inserted + updated,
-      supabaseSynced,
-    });
+      res.status(200).json({
+        ok: true,
+        inserted,
+        updated,
+        total: inserted + updated,
+        supabaseSynced,
+      });
+    } catch (err) {
+      console.error('Erro na importação de produtos:', err);
+      const message = err instanceof Error ? err.message : 'Erro interno ao processar dados';
+      res.status(500).json({ ok: false, error: message });
+    }
   });
 
   app.patch('/api/products/:id', (req, res) => {
