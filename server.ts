@@ -406,7 +406,7 @@ async function runExpirationCheck(store: StoreData): Promise<{
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '50mb' }));
 
   let store = loadStore();
 
@@ -490,6 +490,14 @@ async function startServer() {
     let inserted = 0;
     let updated = 0;
     const affectedProducts: ProductBatch[] = [];
+    const newProducts: ProductBatch[] = [];
+
+    const barcodeIndex = new Map<string, number>();
+    const reducedIndex = new Map<string, number>();
+    store.products.forEach((p, idx) => {
+      if (p.barcode) barcodeIndex.set(p.barcode, idx);
+      if (p.reducedCode) reducedIndex.set(p.reducedCode, idx);
+    });
 
     for (let i = 0; i < items.length; i++) {
       const row = items[i];
@@ -501,11 +509,12 @@ async function startServer() {
 
       if (!name && !barcode && !reducedCode) continue;
 
-      const existingIdx = store.products.findIndex(
-        (p) =>
-          (barcode && p.barcode === barcode) ||
-          (reducedCode && p.reducedCode === reducedCode)
-      );
+      let existingIdx = -1;
+      if (barcode && barcodeIndex.has(barcode)) {
+        existingIdx = barcodeIndex.get(barcode)!;
+      } else if (reducedCode && reducedIndex.has(reducedCode)) {
+        existingIdx = reducedIndex.get(reducedCode)!;
+      }
 
       if (existingIdx !== -1) {
         store.products[existingIdx] = {
@@ -541,10 +550,14 @@ async function startServer() {
           lastAuditedAt: now,
           createdAt: now,
         };
-        store.products.unshift(created);
+        newProducts.push(created);
         inserted++;
         affectedProducts.push(created);
       }
+    }
+
+    if (newProducts.length > 0) {
+      store.products = [...newProducts, ...store.products];
     }
 
     saveStore(store);

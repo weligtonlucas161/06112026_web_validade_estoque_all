@@ -107,25 +107,39 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
     setImporting(true);
     setResultMsg(null);
     try {
-      const res = await fetch('/api/products/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: mappedItems }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        await onImported();
-        setResultMsg({
-          ok: true,
-          text: `Importação concluída: ${data.inserted} novo(s) e ${data.updated} atualizado(s)${
-            data.supabaseSynced ? ' (sincronizado com Supabase)' : ''
-          }.`,
+      const BATCH_SIZE = 500;
+      let totalInserted = 0;
+      let totalUpdated = 0;
+      let anySupabaseSynced = false;
+
+      for (let i = 0; i < mappedItems.length; i += BATCH_SIZE) {
+        const chunk = mappedItems.slice(i, i + BATCH_SIZE);
+        const res = await fetch('/api/products/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: chunk }),
         });
-      } else {
-        setResultMsg({ ok: false, text: data.error || 'Erro ao importar planilha.' });
+        const data = await res.json();
+        if (!res.ok) {
+          setResultMsg({ ok: false, text: data.error || 'Erro ao importar planilha.' });
+          setImporting(false);
+          return;
+        }
+        totalInserted += Number(data.inserted || 0);
+        totalUpdated += Number(data.updated || 0);
+        if (data.supabaseSynced) anySupabaseSynced = true;
       }
-    } catch {
-      setResultMsg({ ok: false, text: 'Falha de conexão ao importar planilha.' });
+
+      await onImported();
+      setResultMsg({
+        ok: true,
+        text: `Importação concluída: ${totalInserted} novo(s) e ${totalUpdated} atualizado(s)${
+          anySupabaseSynced ? ' (sincronizado com Supabase)' : ''
+        }.`,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro desconhecido';
+      setResultMsg({ ok: false, text: `Falha ao importar planilha: ${msg}` });
     } finally {
       setImporting(false);
     }
@@ -145,7 +159,7 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
                 Importar Planilha de Estoque (.xlsx)
               </h3>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Informe o número da coluna (1, 2, 3...) correspondente a cada campo
+                Informe o número da coluna (1, 2, 3...) ou 0 se não possuir a coluna
               </p>
             </div>
           </div>
@@ -220,15 +234,18 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               <div>
                 <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
-                  1. Descrição do Produto / Nome *
+                  1. Descrição / Nome (0 = não possui)
                 </label>
                 <input
                   type="number"
-                  min={1}
+                  min={0}
                   max={maxCols + 20}
                   value={mapping.nameCol}
                   onChange={(e) =>
-                    setMapping((m) => ({ ...m, nameCol: Number(e.target.value) || 1 }))
+                    setMapping((m) => ({
+                      ...m,
+                      nameCol: Math.max(0, parseInt(e.target.value, 10) || 0),
+                    }))
                   }
                   className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
@@ -236,17 +253,17 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
 
               <div>
                 <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
-                  2. Código de Fornecedor
+                  2. Cód. Fornecedor (0 = não possui)
                 </label>
                 <input
                   type="number"
-                  min={1}
+                  min={0}
                   max={maxCols + 20}
                   value={mapping.supplierCodeCol}
                   onChange={(e) =>
                     setMapping((m) => ({
                       ...m,
-                      supplierCodeCol: Number(e.target.value) || 1,
+                      supplierCodeCol: Math.max(0, parseInt(e.target.value, 10) || 0),
                     }))
                   }
                   className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -255,15 +272,18 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
 
               <div>
                 <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
-                  3. Código de Barras (EAN)
+                  3. Cód. Barras EAN (0 = não possui)
                 </label>
                 <input
                   type="number"
-                  min={1}
+                  min={0}
                   max={maxCols + 20}
                   value={mapping.barcodeCol}
                   onChange={(e) =>
-                    setMapping((m) => ({ ...m, barcodeCol: Number(e.target.value) || 1 }))
+                    setMapping((m) => ({
+                      ...m,
+                      barcodeCol: Math.max(0, parseInt(e.target.value, 10) || 0),
+                    }))
                   }
                   className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
@@ -271,17 +291,17 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
 
               <div>
                 <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
-                  4. Código Reduzido
+                  4. Cód. Reduzido (0 = não possui)
                 </label>
                 <input
                   type="number"
-                  min={1}
+                  min={0}
                   max={maxCols + 20}
                   value={mapping.reducedCodeCol}
                   onChange={(e) =>
                     setMapping((m) => ({
                       ...m,
-                      reducedCodeCol: Number(e.target.value) || 1,
+                      reducedCodeCol: Math.max(0, parseInt(e.target.value, 10) || 0),
                     }))
                   }
                   className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -290,15 +310,18 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
 
               <div>
                 <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
-                  5. Quantidade *
+                  5. Quantidade (0 = não possui)
                 </label>
                 <input
                   type="number"
-                  min={1}
+                  min={0}
                   max={maxCols + 20}
                   value={mapping.quantityCol}
                   onChange={(e) =>
-                    setMapping((m) => ({ ...m, quantityCol: Number(e.target.value) || 1 }))
+                    setMapping((m) => ({
+                      ...m,
+                      quantityCol: Math.max(0, parseInt(e.target.value, 10) || 0),
+                    }))
                   }
                   className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
