@@ -1,0 +1,6 @@
+{
+  "name": "ValidaMerc — Gestão de Validade e Auditoria",
+  "description": "Sistema PWA para pequenos mercados com controle de validade, notificações push automáticas, auditoria de presença/inventário e leitura de códigos de barras via Google Services.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
