@@ -24,7 +24,9 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [fileName, setFileName] = useState<string>('');
   const [rawRows, setRawRows] = useState<string[][]>([]);
-  const [skipHeader, setSkipHeader] = useState(true);
+  const MAX_IMPORT_ROWS = 5000;
+  const [startRow, setStartRow] = useState<number>(2);
+  const [endRow, setEndRow] = useState<number>(5001);
   const [mapping, setMapping] = useState<ColumnMapping>({
     reducedCodeCol: 1,
     nameCol: 2,
@@ -43,10 +45,15 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
     return max;
   }, [rawRows]);
 
+  const rowRangeCount = Math.max(0, endRow - startRow + 1);
+  const exceedsMaxRows = rowRangeCount > MAX_IMPORT_ROWS;
+
   const mappedItems = useMemo(() => {
-    const startIdx = skipHeader ? 1 : 0;
+    if (exceedsMaxRows || startRow < 1 || endRow < startRow) return [];
+    const startIdx = Math.max(0, startRow - 1);
+    const endIdx = Math.min(rawRows.length, endRow);
     return rawRows
-      .slice(startIdx)
+      .slice(startIdx, endIdx)
       .map((row) => {
         const getVal = (col1Based: number) => {
           if (col1Based < 1) return '';
@@ -64,7 +71,7 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
         };
       })
       .filter((item) => item.name || item.barcode || item.reducedCode);
-  }, [rawRows, skipHeader, mapping]);
+  }, [rawRows, startRow, endRow, exceedsMaxRows, mapping]);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -81,6 +88,9 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
       defval: '',
     });
     setRawRows(rows);
+    const initialStart = rows.length > 1 ? 2 : 1;
+    setStartRow(initialStart);
+    setEndRow(Math.min(rows.length, initialStart + MAX_IMPORT_ROWS - 1));
   };
 
   const handleDownloadTemplate = () => {
@@ -103,38 +113,49 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
   };
 
   const handleConfirmImport = async () => {
+    if (exceedsMaxRows) {
+      setResultMsg({
+        ok: false,
+        text: `O teto máximo por importação é de ${MAX_IMPORT_ROWS} linhas. Ajuste a linha inicial ou final.`,
+      });
+      return;
+    }
     if (mappedItems.length === 0) return;
     setImporting(true);
     setResultMsg(null);
     try {
-      const BATCH_SIZE = 500;
-      let totalInserted = 0;
-      let totalUpdated = 0;
-      let anySupabaseSynced = false;
-
-      for (let i = 0; i < mappedItems.length; i += BATCH_SIZE) {
-        const chunk = mappedItems.slice(i, i + BATCH_SIZE);
-        const res = await fetch('/api/products/import', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ items: chunk }),
+      const res = await fetch('/api/products/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: mappedItems }),
+      });
+      const rawText = await res.text();
+      let data: {
+        inserted?: number;
+        updated?: number;
+        supabaseSynced?: boolean;
+        error?: string;
+      } = {};
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        setResultMsg({
+          ok: false,
+          text: `O servidor retornou uma resposta inesperada (HTTP ${res.status}). Tente um intervalo menor de linhas.`,
         });
-        const data = await res.json();
-        if (!res.ok) {
-          setResultMsg({ ok: false, text: data.error || 'Erro ao importar planilha.' });
-          setImporting(false);
-          return;
-        }
-        totalInserted += Number(data.inserted || 0);
-        totalUpdated += Number(data.updated || 0);
-        if (data.supabaseSynced) anySupabaseSynced = true;
+        return;
+      }
+
+      if (!res.ok) {
+        setResultMsg({ ok: false, text: data.error || 'Erro ao importar planilha.' });
+        return;
       }
 
       await onImported();
       setResultMsg({
         ok: true,
-        text: `Importação concluída: ${totalInserted} novo(s) e ${totalUpdated} atualizado(s)${
-          anySupabaseSynced ? ' (sincronizado com Supabase)' : ''
+        text: `Importação concluída (linhas ${startRow} a ${endRow}): ${data.inserted} novo(s) e ${data.updated} atualizado(s)${
+          data.supabaseSynced ? ' (sincronizado com Supabase)' : ''
         }.`,
       });
     } catch (err) {
@@ -214,22 +235,69 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
             </div>
           </div>
 
+          {/* Row Range Selection (Start & End Row, max 5000) */}
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+              <h4 className="text-xs font-semibold text-slate-900 dark:text-white">
+                Intervalo de Linhas da Planilha (Teto: 5.000 linhas)
+              </h4>
+              <span
+                className={`text-[11px] font-mono tabular-nums ${
+                  exceedsMaxRows
+                    ? 'text-red-600 dark:text-red-400 font-semibold'
+                    : 'text-slate-500 dark:text-slate-400'
+                }`}
+              >
+                {rowRangeCount} linha(s) selecionada(s)
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
+                  Começa na Linha (ex: 2)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={Math.max(1, rawRows.length || 999999)}
+                  value={startRow}
+                  onChange={(e) =>
+                    setStartRow(Math.max(1, parseInt(e.target.value, 10) || 1))
+                  }
+                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-400 mb-1">
+                  Termina na Linha (ex: 502)
+                </label>
+                <input
+                  type="number"
+                  min={startRow}
+                  max={Math.max(1, rawRows.length || 999999)}
+                  value={endRow}
+                  onChange={(e) =>
+                    setEndRow(Math.max(1, parseInt(e.target.value, 10) || 1))
+                  }
+                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3 py-2 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+
+            {exceedsMaxRows && (
+              <p className="text-xs font-medium text-red-600 dark:text-red-400">
+                O intervalo selecionado ultrapassa o teto de 5.000 linhas por importação.
+              </p>
+            )}
+          </div>
+
           {/* 5 Column Number Inputs */}
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h4 className="text-xs font-semibold text-slate-900 dark:text-white">
-                Mapeamento das 5 Colunas (Número da Coluna na Planilha)
-              </h4>
-              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={skipHeader}
-                  onChange={(e) => setSkipHeader(e.target.checked)}
-                  className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
-                />
-                <span>Ignorar linha 1 (cabeçalho)</span>
-              </label>
-            </div>
+            <h4 className="text-xs font-semibold text-slate-900 dark:text-white">
+              Mapeamento das 5 Colunas (Número da Coluna ou 0)
+            </h4>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               <div>
@@ -396,7 +464,7 @@ export const XlsxImportModal: React.FC<XlsxImportModalProps> = ({
             <button
               type="button"
               onClick={handleConfirmImport}
-              disabled={importing || mappedItems.length === 0}
+              disabled={importing || exceedsMaxRows || mappedItems.length === 0}
               className="rounded-lg bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 min-h-[40px]"
             >
               {importing

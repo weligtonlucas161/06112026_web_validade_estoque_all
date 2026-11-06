@@ -298,7 +298,11 @@ function loadStore(): StoreData {
 }
 
 function saveStore(store: StoreData) {
-  fs.writeFileSync(STORE_PATH, JSON.stringify(store, null, 2));
+  const serialized =
+    store.products.length > 200
+      ? JSON.stringify(store)
+      : JSON.stringify(store, null, 2);
+  fs.writeFileSync(STORE_PATH, serialized);
 }
 
 function daysUntil(dateStr: string): number {
@@ -485,6 +489,13 @@ async function startServer() {
       return;
     }
 
+    if (items.length > 5000) {
+      res.status(400).json({
+        error: 'O teto máximo por importação é de 5.000 linhas. Reduza o intervalo de linhas.',
+      });
+      return;
+    }
+
     const now = new Date().toISOString();
     const defaultExpiry = addDaysISO(30);
     let inserted = 0;
@@ -597,6 +608,7 @@ async function startServer() {
               Prefer: 'resolution=merge-duplicates',
             },
             body: JSON.stringify(sbPayload),
+            signal: AbortSignal.timeout(8000),
           }
         );
         supabaseSynced = sbRes.ok;
