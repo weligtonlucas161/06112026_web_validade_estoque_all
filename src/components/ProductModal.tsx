@@ -30,12 +30,14 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   initialData,
   onOpenScanner,
 }) => {
+  const [reducedCode, setReducedCode] = useState('');
   const [barcode, setBarcode] = useState('');
   const [name, setName] = useState('');
   const [brand, setBrand] = useState('');
   const [category, setCategory] = useState<ProductCategory>('Laticínios');
   const [location, setLocation] = useState('');
   const [supplier, setSupplier] = useState('');
+  const [supplierCode, setSupplierCode] = useState('');
   const [batchCode, setBatchCode] = useState('');
   const [quantity, setQuantity] = useState('12');
   const [unit, setUnit] = useState<ProductUnit>('un');
@@ -45,12 +47,14 @@ export const ProductModal: React.FC<ProductModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      setReducedCode(initialData?.reducedCode || '');
       setBarcode(initialData?.barcode || '');
       setName(initialData?.name || '');
       setBrand(initialData?.brand || '');
       setCategory(initialData?.category || 'Laticínios');
       setLocation(initialData?.location || 'Corredor 1 · Prateleira A');
       setSupplier(initialData?.supplier || '');
+      setSupplierCode(initialData?.supplierCode || '');
       setBatchCode(
         initialData?.batchCode || `LT-${Math.floor(1000 + Math.random() * 9000)}`
       );
@@ -74,12 +78,14 @@ export const ProductModal: React.FC<ProductModalProps> = ({
     try {
       await onSave({
         id: initialData?.id,
+        reducedCode: reducedCode.trim() || undefined,
         barcode: barcode.trim(),
         name: name.trim(),
         brand: brand.trim() || 'Marca Própria',
         category,
         location: location.trim() || 'Corredor Principal',
         supplier: supplier.trim() || 'Fornecedor Padrão',
+        supplierCode: supplierCode.trim() || undefined,
         batchCode: batchCode.trim(),
         quantity: Number(quantity) || 0,
         unit,
@@ -148,6 +154,32 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Ex: Leite Integral UHT 1L"
                 className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                Código Reduzido
+              </label>
+              <input
+                type="text"
+                value={reducedCode}
+                onChange={(e) => setReducedCode(e.target.value)}
+                placeholder="Ex: 1042"
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2 text-sm font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                Código de Fornecedor
+              </label>
+              <input
+                type="text"
+                value={supplierCode}
+                onChange={(e) => setSupplierCode(e.target.value)}
+                placeholder="Ex: FORN-102"
+                className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 px-3.5 py-2 text-sm font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
               />
             </div>
 

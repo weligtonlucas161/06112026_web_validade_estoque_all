@@ -15,14 +15,14 @@ import {
   Sun,
   Tag,
   Trash2,
-  KeyRound,
+  Boxes,
 } from 'lucide-react';
 import { AuditView } from './components/AuditView';
 import { BarcodeScannerModal } from './components/BarcodeScannerModal';
-import { IntegrationsView } from './components/IntegrationsView';
 import { NotificationsView } from './components/NotificationsView';
 import { ProductModal } from './components/ProductModal';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAInstallButton';
+import { StockView } from './components/StockView';
 import type {
   AppNotification,
   AuditSession,
@@ -40,7 +40,7 @@ import {
   getExpirySeverity,
 } from './utils/expiry';
 
-type ActiveTab = 'painel' | 'auditoria' | 'notificacoes' | 'integracoes';
+type ActiveTab = 'painel' | 'estoque' | 'auditoria' | 'notificacoes';
 type StatusFilter = 'todos' | 'vencido' | 'critico' | 'atencao' | 'ruptura';
 
 const CACHE_KEY = 'validamerc_products_cache_v1';
@@ -366,6 +366,19 @@ export default function App() {
 
           <button
             type="button"
+            onClick={() => setActiveTab('estoque')}
+            className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-lg transition-colors ${
+              activeTab === 'estoque'
+                ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-semibold'
+                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800/60 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <Boxes className="w-4 h-4 shrink-0" />
+            <span>Estoque</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveTab('auditoria')}
             className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-lg transition-colors ${
               activeTab === 'auditoria'
@@ -396,19 +409,6 @@ export default function App() {
               </span>
             )}
           </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('integracoes')}
-            className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-sm font-medium rounded-lg transition-colors ${
-              activeTab === 'integracoes'
-                ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-semibold'
-                : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800/60 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            <KeyRound className="w-4 h-4 shrink-0" />
-            <span>Cofre & Integrações</span>
-          </button>
         </nav>
 
         <div className="p-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
@@ -431,10 +431,10 @@ export default function App() {
               ValidaMerc
             </span>
             <span className="hidden md:inline text-sm font-semibold text-slate-900 dark:text-white truncate">
-              {activeTab === 'painel' && 'Controle de Validade e Estoque'}
+              {activeTab === 'painel' && 'Controle de Validade e Lotes'}
+              {activeTab === 'estoque' && 'Gestão de Estoque e Importação (.xlsx)'}
               {activeTab === 'auditoria' && 'Auditoria de Presença, Validade e Inventário'}
               {activeTab === 'notificacoes' && 'Notificações Automáticas via Push'}
-              {activeTab === 'integracoes' && 'Cofre de Credenciais (Supabase & Vercel)'}
             </span>
           </div>
 
@@ -816,6 +816,22 @@ export default function App() {
             </>
           )}
 
+          {activeTab === 'estoque' && (
+            <StockView
+              products={products}
+              onQuickUpdate={handleQuickStatusUpdate}
+              onEditProduct={(prod) => {
+                setEditingProduct(prod);
+                setProductModalOpen(true);
+              }}
+              onNewProduct={() => {
+                setEditingProduct(null);
+                setProductModalOpen(true);
+              }}
+              onRefresh={fetchAllData}
+            />
+          )}
+
           {activeTab === 'auditoria' && (
             <AuditView
               products={products}
@@ -838,13 +854,11 @@ export default function App() {
               onMarkAllRead={handleMarkAllRead}
             />
           )}
-
-          {activeTab === 'integracoes' && <IntegrationsView />}
         </main>
       </div>
 
-      {/* Mobile Fixed Bottom Tab Bar (Thumb Zone) */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-16 pb-safe bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 grid grid-cols-5 items-center">
+      {/* Mobile Fixed Bottom Tab Bar (Thumb Zone - 4 items) */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-16 pb-safe bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 grid grid-cols-4 items-center">
         <button
           type="button"
           onClick={() => setActiveTab('painel')}
@@ -860,14 +874,15 @@ export default function App() {
 
         <button
           type="button"
-          onClick={() => {
-            setAuditScanCallback(null);
-            setScannerOpen(true);
-          }}
-          className="flex flex-col items-center justify-center h-full text-slate-500 dark:text-slate-400"
+          onClick={() => setActiveTab('estoque')}
+          className={`flex flex-col items-center justify-center h-full ${
+            activeTab === 'estoque'
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : 'text-slate-500 dark:text-slate-400'
+          }`}
         >
-          <ScanBarcode className="w-5 h-5" />
-          <span className="text-[10px] font-medium mt-1">Scanner</span>
+          <Boxes className="w-5 h-5" />
+          <span className="text-[10px] font-medium mt-1">Estoque</span>
         </button>
 
         <button
@@ -896,19 +911,6 @@ export default function App() {
           <span className="text-[10px] font-medium mt-1">
             Alertas{unreadNotificationsCount > 0 ? ` (${unreadNotificationsCount})` : ''}
           </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('integracoes')}
-          className={`flex flex-col items-center justify-center h-full ${
-            activeTab === 'integracoes'
-              ? 'text-emerald-600 dark:text-emerald-400'
-              : 'text-slate-500 dark:text-slate-400'
-          }`}
-        >
-          <KeyRound className="w-5 h-5" />
-          <span className="text-[10px] font-medium mt-1">Cofre</span>
         </button>
       </nav>
 

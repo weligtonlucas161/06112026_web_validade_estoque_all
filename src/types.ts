@@ -18,12 +18,14 @@ export type ExpirySeverity = 'vencido' | 'critico' | 'atencao' | 'em_dia';
 
 export interface ProductBatch {
   id: string;
-  barcode: string;
-  name: string;
+  reducedCode?: string; // Código Reduzido (ex: 1042)
+  barcode: string; // Código de Barras (EAN)
+  name: string; // Descrição do Produto / Nome
   brand: string;
   category: ProductCategory;
   location: string;
   supplier: string;
+  supplierCode?: string; // Código de Fornecedor
   batchCode: string;
   quantity: number;
   unit: ProductUnit;
