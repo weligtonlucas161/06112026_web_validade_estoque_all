@@ -10,6 +10,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import type {
   AppNotification,
   AuditSession,
+  EstoqueItem,
   ProductBatch,
   PushSettings,
 } from './src/types';
@@ -20,6 +21,7 @@ const STORE_PATH = path.join(DATA_DIR, 'store.json');
 
 interface StoreData {
   products: ProductBatch[];
+  estoque: EstoqueItem[];
   audits: AuditSession[];
   notifications: AppNotification[];
   pushSettings: PushSettings;
@@ -263,8 +265,21 @@ function createInitialStore(): StoreData {
     },
   ];
 
+  const estoque: EstoqueItem[] = products.map((p, idx) => ({
+    id: p.id,
+    id_loja: 'loja-1',
+    produto: p.name,
+    codigo_ean: p.barcode || '',
+    codigo_reduzido: p.reducedCode || String(1001 + idx),
+    codigo_fornecedor: p.supplierCode || 'FORN-01',
+    quantidade: p.quantity,
+    atualizado_em: now,
+    criado_em: now,
+  }));
+
   return {
     products,
+    estoque,
     audits,
     notifications,
     pushSettings: {
@@ -290,7 +305,21 @@ function loadStore(): StoreData {
   }
   try {
     const raw = fs.readFileSync(STORE_PATH, 'utf-8');
-    return JSON.parse(raw) as StoreData;
+    const parsed = JSON.parse(raw) as StoreData;
+    if (!Array.isArray(parsed.estoque)) {
+      parsed.estoque = (parsed.products || []).map((p, idx) => ({
+        id: p.id,
+        id_loja: 'loja-1',
+        produto: p.name,
+        codigo_ean: p.barcode || '',
+        codigo_reduzido: p.reducedCode || String(1001 + idx),
+        codigo_fornecedor: p.supplierCode || 'FORN-01',
+        quantidade: p.quantity,
+        atualizado_em: p.createdAt || new Date().toISOString(),
+        criado_em: p.createdAt || new Date().toISOString(),
+      }));
+    }
+    return parsed;
   } catch {
     const initial = createInitialStore();
     fs.writeFileSync(STORE_PATH, JSON.stringify(initial, null, 2));
@@ -633,6 +662,285 @@ async function startServer() {
     } catch (err) {
       console.error('Erro na importação de produtos:', err);
       const message = err instanceof Error ? err.message : 'Erro interno ao processar dados';
+      res.status(500).json({ ok: false, error: message });
+    }
+  });
+
+  // ============================================================================
+  // ROTAS SEPARADAS DE ESTOQUE (id, id_loja, produto, codigo_ean, codigo_reduzido, codigo_fornecedor, quantidade)
+  // ============================================================================
+
+  // Obter itens da tabela separada de estoque
+  app.get('/api/estoque', (req, res) => {
+    store = loadStore();
+    const idLoja = req.query.id_loja ? String(req.query.id_loja).trim() : '';
+    const items = idLoja
+      ? store.estoque.filter((item) => item.id_loja === idLoja)
+      : store.estoque;
+    res.json({
+      ok: true,
+      total: items.length,
+      items,
+    });
+  });
+
+  // Obter o script SQL oficial do Supabase para criar a estrutura separada
+  app.get('/api/estoque/schema.sql', (_req, res) => {
+    const schemaPath = path.resolve(process.cwd(), 'supabase', 'schema.sql');
+    if (fs.existsSync(schemaPath)) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.send(fs.readFileSync(schemaPath, 'utf-8'));
+    } else {
+      res.status(404).send('-- supabase/schema.sql não encontrado');
+    }
+  });
+
+  // Criar ou atualizar item individual de estoque
+  app.post('/api/estoque', (req, res) => {
+    store = loadStore();
+    const body = req.body || {};
+    const now = new Date().toISOString();
+    const id = body.id || `est-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const id_loja = String(body.id_loja || 'loja-1').trim();
+    const produto = String(body.produto || body.name || '').trim();
+    const codigo_ean = String(body.codigo_ean || body.barcode || '').trim();
+    const codigo_reduzido = String(body.codigo_reduzido || body.reducedCode || '').trim();
+    const codigo_fornecedor = String(body.codigo_fornecedor || body.supplierCode || '').trim();
+    const quantidade = Number(body.quantidade ?? body.quantity ?? 0) || 0;
+
+    const existingIdx = store.estoque.findIndex((e) => e.id === id);
+    if (existingIdx !== -1) {
+      store.estoque[existingIdx] = {
+        ...store.estoque[existingIdx],
+        id_loja,
+        produto: produto || store.estoque[existingIdx].produto,
+        codigo_ean,
+        codigo_reduzido,
+        codigo_fornecedor,
+        quantidade,
+        atualizado_em: now,
+      };
+      saveStore(store);
+      res.json({ ok: true, item: store.estoque[existingIdx] });
+    } else {
+      const newItem: EstoqueItem = {
+        id,
+        id_loja,
+        produto: produto || 'Produto Sem Descrição',
+        codigo_ean,
+        codigo_reduzido,
+        codigo_fornecedor,
+        quantidade,
+        atualizado_em: now,
+        criado_em: now,
+      };
+      store.estoque.unshift(newItem);
+      saveStore(store);
+      res.status(201).json({ ok: true, item: newItem });
+    }
+  });
+
+  // Excluir item de estoque
+  app.delete('/api/estoque/:id', (req, res) => {
+    store = loadStore();
+    const id = req.params.id;
+    store.estoque = store.estoque.filter((item) => item.id !== id);
+    saveStore(store);
+    res.json({ ok: true });
+  });
+
+  // Importação de estoque em blocos (chunks de 10) com suporte ao Supabase e banco local
+  app.post('/api/estoque/import', async (req, res) => {
+    try {
+      store = loadStore();
+      const items = req.body?.items;
+      const defaultLoja = String(req.body?.id_loja || 'loja-1').trim();
+
+      if (!Array.isArray(items) || items.length === 0) {
+        res.status(400).json({
+          ok: false,
+          error: 'A lista de itens enviada está vazia ou em formato inválido.',
+        });
+        return;
+      }
+
+      const now = new Date().toISOString();
+      let inserted = 0;
+      let updated = 0;
+      const affectedEstoque: EstoqueItem[] = [];
+
+      // Mapeia itens existentes para busca em O(1)
+      const eanMap = new Map<string, number>();
+      const reducedMap = new Map<string, number>();
+      const idMap = new Map<string, number>();
+
+      store.estoque.forEach((item, idx) => {
+        idMap.set(item.id, idx);
+        const loja = item.id_loja || 'loja-1';
+        if (item.codigo_ean) eanMap.set(`${loja}:${item.codigo_ean.trim()}`, idx);
+        if (item.codigo_reduzido) reducedMap.set(`${loja}:${item.codigo_reduzido.trim()}`, idx);
+      });
+
+      for (let i = 0; i < items.length; i++) {
+        const row = items[i];
+        if (!row) continue;
+
+        const produto = String(row.produto || row.name || '').trim();
+        const codigo_ean = String(row.codigo_ean || row.barcode || '').trim();
+        const codigo_reduzido = String(row.codigo_reduzido || row.reducedCode || '').trim();
+        const codigo_fornecedor = String(row.codigo_fornecedor || row.supplierCode || '').trim();
+        const quantidade = Number(row.quantidade ?? row.quantity ?? 0) || 0;
+        const id_loja = String(row.id_loja || defaultLoja || 'loja-1').trim();
+
+        if (!produto && !codigo_ean && !codigo_reduzido) continue;
+
+        let existingIdx = -1;
+        const rowId = row.id ? String(row.id).trim() : '';
+        if (rowId && idMap.has(rowId)) {
+          existingIdx = idMap.get(rowId)!;
+        } else if (codigo_ean && eanMap.has(`${id_loja}:${codigo_ean}`)) {
+          existingIdx = eanMap.get(`${id_loja}:${codigo_ean}`)!;
+        } else if (codigo_reduzido && reducedMap.has(`${id_loja}:${codigo_reduzido}`)) {
+          existingIdx = reducedMap.get(`${id_loja}:${codigo_reduzido}`)!;
+        }
+
+        if (existingIdx !== -1) {
+          store.estoque[existingIdx] = {
+            ...store.estoque[existingIdx],
+            id_loja,
+            produto: produto || store.estoque[existingIdx].produto,
+            codigo_ean: codigo_ean || store.estoque[existingIdx].codigo_ean,
+            codigo_reduzido: codigo_reduzido || store.estoque[existingIdx].codigo_reduzido,
+            codigo_fornecedor: codigo_fornecedor || store.estoque[existingIdx].codigo_fornecedor,
+            quantidade,
+            atualizado_em: now,
+          };
+          updated++;
+          affectedEstoque.push(store.estoque[existingIdx]);
+        } else {
+          const newId = rowId || `est-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`;
+          const newItem: EstoqueItem = {
+            id: newId,
+            id_loja,
+            produto: produto || `Produto ${codigo_reduzido || codigo_ean}`,
+            codigo_ean,
+            codigo_reduzido,
+            codigo_fornecedor,
+            quantidade,
+            atualizado_em: now,
+            criado_em: now,
+          };
+          store.estoque.unshift(newItem);
+          inserted++;
+          affectedEstoque.push(newItem);
+
+          // Atualiza mapas com a nova posição
+          idMap.set(newId, 0);
+          if (codigo_ean) eanMap.set(`${id_loja}:${codigo_ean}`, 0);
+          if (codigo_reduzido) reducedMap.set(`${id_loja}:${codigo_reduzido}`, 0);
+        }
+      }
+
+      // Sincroniza também com store.products para que Validade e Auditorias permaneçam consistentes
+      const defaultExpiry = addDaysISO(30);
+      for (const item of affectedEstoque) {
+        const pIdx = store.products.findIndex(
+          (p) =>
+            (item.codigo_ean && p.barcode === item.codigo_ean) ||
+            (item.codigo_reduzido && p.reducedCode === item.codigo_reduzido) ||
+            p.id === item.id
+        );
+        if (pIdx !== -1) {
+          store.products[pIdx].name = item.produto || store.products[pIdx].name;
+          store.products[pIdx].quantity = item.quantidade;
+          store.products[pIdx].supplierCode = item.codigo_fornecedor || store.products[pIdx].supplierCode;
+          store.products[pIdx].presenceStatus = item.quantidade > 0 ? 'presente' : 'ruptura';
+          store.products[pIdx].lastAuditedAt = now;
+        } else {
+          store.products.unshift({
+            id: item.id,
+            name: item.produto,
+            barcode: item.codigo_ean || item.codigo_reduzido || `IMP-${Date.now()}`,
+            reducedCode: item.codigo_reduzido || undefined,
+            supplierCode: item.codigo_fornecedor || undefined,
+            brand: 'Estoque Central',
+            category: 'Mercearia',
+            location: 'Estoque Geral',
+            supplier: item.codigo_fornecedor ? `Fornecedor ${item.codigo_fornecedor}` : 'Fornecedor Padrão',
+            batchCode: `LT-${Math.floor(1000 + Math.random() * 9000)}`,
+            quantity: item.quantidade,
+            unit: 'un',
+            unitPrice: 0,
+            expirationDate: defaultExpiry,
+            status: 'ativo',
+            presenceStatus: item.quantidade > 0 ? 'presente' : 'ruptura',
+            lastAuditedAt: now,
+            createdAt: now,
+          });
+        }
+      }
+
+      saveStore(store);
+
+      // Sincronização segura com Supabase na tabela separada 'estoque'
+      let supabaseSynced = false;
+      let supabaseMessage = '';
+      const { raw } = getEffectiveIntegrations();
+      if (raw.supabaseUrl && raw.supabaseKey && affectedEstoque.length > 0) {
+        try {
+          const sbPayload = affectedEstoque.map((e) => ({
+            id: e.id,
+            id_loja: e.id_loja,
+            produto: e.produto,
+            codigo_ean: e.codigo_ean || '',
+            codigo_reduzido: e.codigo_reduzido || '',
+            codigo_fornecedor: e.codigo_fornecedor || '',
+            quantidade: e.quantidade,
+            atualizado_em: now,
+          }));
+
+          const sbRes = await fetch(
+            `${raw.supabaseUrl}/rest/v1/estoque?on_conflict=id`,
+            {
+              method: 'POST',
+              headers: {
+                apikey: raw.supabaseKey,
+                Authorization: `Bearer ${raw.supabaseKey}`,
+                'Content-Type': 'application/json',
+                Prefer: 'resolution=merge-duplicates',
+              },
+              body: JSON.stringify(sbPayload),
+              signal: AbortSignal.timeout(6000),
+            }
+          );
+
+          if (sbRes.ok) {
+            supabaseSynced = true;
+            supabaseMessage = 'Sincronizado com tabela estoque no Supabase.';
+          } else {
+            const errBody = await sbRes.text();
+            console.warn('Aviso Supabase estoque:', sbRes.status, errBody);
+            supabaseSynced = false;
+            supabaseMessage = `Supabase retornou HTTP ${sbRes.status}. Verifique se a tabela 'estoque' foi criada com supabase/schema.sql.`;
+          }
+        } catch {
+          supabaseSynced = false;
+          supabaseMessage = 'Supabase inacessível no momento. Gravado com sucesso no banco local.';
+        }
+      }
+
+      res.status(200).json({
+        ok: true,
+        inserted,
+        updated,
+        total: inserted + updated,
+        supabaseSynced,
+        supabaseMessage,
+        items: affectedEstoque,
+      });
+    } catch (err) {
+      console.error('Erro na importação de estoque:', err);
+      const message = err instanceof Error ? err.message : String(err);
       res.status(500).json({ ok: false, error: message });
     }
   });
@@ -1195,11 +1503,10 @@ async function startServer() {
 
   // Vite or Static serving
   if (process.env.NODE_ENV !== 'production') {
-    const isHmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: isHmrDisabled ? false : { server: httpServer },
+        hmr: false,
       },
       appType: 'spa',
     });

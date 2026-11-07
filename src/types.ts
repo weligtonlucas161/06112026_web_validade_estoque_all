@@ -16,6 +16,22 @@ export type PresenceStatus = 'presente' | 'ruptura' | 'reposicao';
 
 export type ExpirySeverity = 'vencido' | 'critico' | 'atencao' | 'em_dia';
 
+/**
+ * Estrutura separada do Banco de Dados: ESTOQUE
+ * Colunas: id, id_loja, produto, codigo_ean, codigo_reduzido, codigo_fornecedor, quantidade
+ */
+export interface EstoqueItem {
+  id: string;
+  id_loja: string;
+  produto: string;
+  codigo_ean: string;
+  codigo_reduzido: string;
+  codigo_fornecedor: string;
+  quantidade: number;
+  atualizado_em?: string;
+  criado_em?: string;
+}
+
 export interface ProductBatch {
   id: string;
   reducedCode?: string; // Código Reduzido (ex: 1042)
