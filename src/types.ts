@@ -17,8 +17,69 @@ export type PresenceStatus = 'presente' | 'ruptura' | 'reposicao';
 export type ExpirySeverity = 'vencido' | 'critico' | 'atencao' | 'em_dia';
 
 /**
- * Estrutura separada do Banco de Dados: ESTOQUE
- * Colunas: id, id_loja, produto, codigo_ean, codigo_reduzido, codigo_fornecedor, quantidade
+ * Tabela LOJAS (Multi-Tenancy, Matriz e Filiais)
+ */
+export interface Loja {
+  id: string;
+  nome_loja: string;
+  cor_borda: string;
+  ativa: boolean;
+  matriz_id?: string | null;
+  matrix_uuid?: string | null;
+  limite_lojas?: number;
+  limite_usuarios_por_loja?: number;
+  cnpj?: string;
+  endereco?: string;
+  telefone?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * Tabela PRODUTOS (Isolamento por Loja / Estoque)
+ */
+export interface Produto {
+  id: string;
+  nome: string;
+  codigo_barras: string;
+  plu?: string | null; // Código reduzido / interno
+  setor: string;
+  quantidade: number;
+  data_vencimento: string; // YYYY-MM-DD
+  loja_id: string;
+  criado_em?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * Tabela PRODUTOS_CATALOGO_UNIVERSAL (Base Global Compartilhada)
+ */
+export interface CatalogoUniversalItem {
+  codigo_barras: string;
+  nome: string;
+  criado_em?: string;
+  atualizado_em?: string;
+}
+
+/**
+ * Tabela USUARIOS
+ */
+export interface Usuario {
+  id: string;
+  matricula: string;
+  nome: string;
+  cargo: 'adm' | 'master' | 'operador';
+  setor?: string | null;
+  loja_id?: string | null;
+  email?: string | null;
+  ativo: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/**
+ * Estrutura de ESTOQUE
  */
 export interface EstoqueItem {
   id: string;
@@ -34,11 +95,13 @@ export interface EstoqueItem {
 
 export interface ProductBatch {
   id: string;
-  reducedCode?: string; // Código Reduzido (ex: 1042)
+  reducedCode?: string; // Código Reduzido / PLU (ex: 1042)
+  plu?: string; // Sinônimo para banco de dados
   barcode: string; // Código de Barras (EAN)
   name: string; // Descrição do Produto / Nome
   brand: string;
   category: ProductCategory;
+  setor?: string; // Setor no novo banco
   location: string;
   supplier: string;
   supplierCode?: string; // Código de Fornecedor
@@ -49,6 +112,7 @@ export interface ProductBatch {
   expirationDate: string; // YYYY-MM-DD
   status: BatchStatus;
   presenceStatus: PresenceStatus;
+  loja_id?: string; // Isolamento por loja
   lastAuditedAt?: string;
   createdAt: string;
 }

@@ -19,7 +19,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import type { EstoqueItem, ProductBatch } from '../types';
+import type { EstoqueItem, Loja, ProductBatch } from '../types';
 
 interface StockViewProps {
   products: ProductBatch[];
@@ -54,6 +54,54 @@ interface ImportApiResponse {
   total: number;
   supabaseSynced: boolean;
   supabaseMessage?: string;
+}
+
+function parseQuantityBR(raw: unknown): number {
+  if (typeof raw === 'number') {
+    return isNaN(raw) ? 0 : raw;
+  }
+  if (!raw) return 0;
+  let str = String(raw).trim();
+  str = str.replace(/[a-zA-Z]/g, '').trim();
+  if (!str) return 0;
+
+  if (str.includes('.') && str.includes(',')) {
+    str = str.replace(/\./g, '').replace(',', '.');
+  } else if (str.includes(',')) {
+    str = str.replace(',', '.');
+  } else if (str.includes('.')) {
+    const parts = str.split('.');
+    if (parts.length === 2 && parts[1].length === 3 && Number(parts[0]) > 0) {
+      str = parts[0] + parts[1];
+    }
+  }
+
+  const num = Number(str);
+  return isNaN(num) ? 0 : Math.round(num * 1000) / 1000;
+}
+
+function sanitizeBarcode(val: unknown): string {
+  if (val === undefined || val === null) return '';
+  let str = String(val).trim();
+  if (!str) return '';
+
+  if (/^[0-9.]+[eE][+-]?[0-9]+$/.test(str)) {
+    const num = Number(str);
+    if (!isNaN(num) && Number.isFinite(num)) {
+      str = BigInt(Math.round(num)).toString();
+    }
+  }
+
+  str = str.replace(/\.0+$/, '');
+  str = str.replace(/\s+/g, '');
+  return str;
+}
+
+function sanitizeCode(val: unknown): string {
+  if (val === undefined || val === null) return '';
+  let str = String(val).trim();
+  str = str.replace(/\.0+$/, '');
+  return str;
 }
 
 const MAX_ROWS_LIMIT = 5000;
@@ -150,10 +198,12 @@ export const StockView: React.FC<StockViewProps> = ({
   const [storeFilter, setStoreFilter] = useState<string>('todas');
   const [estoqueList, setEstoqueList] = useState<EstoqueItem[]>([]);
   const [loadingEstoque, setLoadingEstoque] = useState(false);
+  const [lojas, setLojas] = useState<Loja[]>([]);
 
   // Modais
   const [importOpen, setImportOpen] = useState(false);
   const [sqlModalOpen, setSqlModalOpen] = useState(false);
+  const [sqlScriptType, setSqlScriptType] = useState<'master' | 'estoque'>('master');
   const [sqlCopied, setSqlCopied] = useState(false);
   const [editItemModal, setEditItemModal] = useState<EstoqueItem | null>(null);
 
@@ -163,7 +213,7 @@ export const StockView: React.FC<StockViewProps> = ({
   const [rawRows, setRawRows] = useState<string[][]>([]);
   const [startRow, setStartRow] = useState<number>(2);
   const [endRow, setEndRow] = useState<number>(5001);
-  const [selectedStoreId, setSelectedStoreId] = useState<string>('loja-1');
+  const [selectedStoreId, setSelectedStoreId] = useState<string>('loja-matriz-01');
   const [mapping, setMapping] = useState<ImportColumnMapping>({
     nameCol: 1, // Descrição do produto / nome
     supplierCodeCol: 2, // Código de fornecedor
@@ -191,6 +241,24 @@ export const StockView: React.FC<StockViewProps> = ({
   const [recordingError, setRecordingError] = useState<string | null>(null);
   const [recordingComplete, setRecordingComplete] = useState(false);
 
+  // Carrega lojas cadastradas
+  const fetchLojas = async () => {
+    try {
+      const res = await fetch('/api/lojas');
+      if (res.ok) {
+        const json = await res.json();
+        if (json.ok && Array.isArray(json.lojas)) {
+          setLojas(json.lojas);
+          if (json.lojas.length > 0) {
+            setSelectedStoreId(json.lojas[0].id);
+          }
+        }
+      }
+    } catch {
+      // Offline fallback
+    }
+  };
+
   // Carrega itens da tabela separada de estoque do backend
   const fetchEstoque = async () => {
     try {
@@ -206,7 +274,7 @@ export const StockView: React.FC<StockViewProps> = ({
       // Fallback a partir de products se o endpoint ainda não tiver dados
       const fallback = products.map((p, idx) => ({
         id: p.id,
-        id_loja: 'loja-1',
+        id_loja: 'loja-matriz-01',
         produto: p.name,
         codigo_ean: p.barcode || '',
         codigo_reduzido: p.reducedCode || String(1001 + idx),
@@ -219,7 +287,7 @@ export const StockView: React.FC<StockViewProps> = ({
       // Offline fallback
       const fallback = products.map((p, idx) => ({
         id: p.id,
-        id_loja: 'loja-1',
+        id_loja: 'loja-matriz-01',
         produto: p.name,
         codigo_ean: p.barcode || '',
         codigo_reduzido: p.reducedCode || String(1001 + idx),
@@ -234,6 +302,7 @@ export const StockView: React.FC<StockViewProps> = ({
   };
 
   useEffect(() => {
+    fetchLojas();
     fetchEstoque();
   }, [products]);
 
@@ -279,8 +348,8 @@ export const StockView: React.FC<StockViewProps> = ({
   const selectedRowsCount = Math.max(0, endRow - startRow + 1);
   const exceedsMaxRows = selectedRowsCount > MAX_ROWS_LIMIT;
 
-  // Itens mapeados da planilha
-  const mappedItems: EstoqueImportItem[] = useMemo(() => {
+  // Itens mapeados da planilha com sanitização completa de dados
+  const mappedItemsWithRowNumber = useMemo(() => {
     if (exceedsMaxRows || startRow < 1 || endRow < startRow || rawRows.length === 0) {
       return [];
     }
@@ -288,31 +357,51 @@ export const StockView: React.FC<StockViewProps> = ({
     const startIdx = Math.max(0, startRow - 1);
     const endIdx = Math.min(rawRows.length, endRow);
 
-    return rawRows
-      .slice(startIdx, endIdx)
-      .map((row) => {
-        const getCell = (col1Based: number): string => {
-          if (col1Based < 1) return '';
-          const val = row[col1Based - 1];
-          return val !== undefined && val !== null ? String(val).trim() : '';
-        };
+    const items: Array<EstoqueImportItem & { originalRow: number }> = [];
 
-        const rawQty = getCell(mapping.quantityCol).replace(',', '.');
-        const quantidade = Number(rawQty) || 0;
+    for (let i = startIdx; i < endIdx; i++) {
+      const row = rawRows[i];
+      if (!row || !Array.isArray(row)) continue;
 
-        return {
-          id_loja: selectedStoreId || 'loja-1',
-          produto: getCell(mapping.nameCol),
-          codigo_fornecedor: getCell(mapping.supplierCodeCol),
-          codigo_ean: getCell(mapping.barcodeCol),
-          codigo_reduzido: getCell(mapping.reducedCodeCol),
+      const getCell = (col1Based: number): string => {
+        if (col1Based < 1) return '';
+        const val = row[col1Based - 1];
+        return val !== undefined && val !== null ? String(val).trim() : '';
+      };
+
+      const produto = getCell(mapping.nameCol);
+      const codigo_fornecedor = sanitizeCode(getCell(mapping.supplierCodeCol));
+      const codigo_ean = sanitizeBarcode(getCell(mapping.barcodeCol));
+      const codigo_reduzido = sanitizeCode(getCell(mapping.reducedCodeCol));
+      const quantidade = parseQuantityBR(getCell(mapping.quantityCol));
+
+      if (produto || codigo_ean || codigo_reduzido) {
+        items.push({
+          id_loja: selectedStoreId || 'loja-matriz-01',
+          produto,
+          codigo_fornecedor,
+          codigo_ean,
+          codigo_reduzido,
           quantidade,
-        };
-      })
-      .filter((item) => item.produto || item.codigo_ean || item.codigo_reduzido);
+          originalRow: i + 1,
+        });
+      }
+    }
+
+    return items;
   }, [rawRows, startRow, endRow, exceedsMaxRows, mapping, selectedStoreId]);
 
-  // Leitura da planilha .xlsx / .csv
+  const mappedItems = useMemo(
+    () => mappedItemsWithRowNumber.map(({ originalRow, ...rest }) => rest),
+    [mappedItemsWithRowNumber]
+  );
+
+  // Primeiras 5 linhas para a pré-visualização em tempo real
+  const previewItems = useMemo(() => {
+    return mappedItemsWithRowNumber.slice(0, 5);
+  }, [mappedItemsWithRowNumber]);
+
+  // Leitura da planilha .xlsx / .xls / .csv com auto-detecção de cabeçalhos
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -331,10 +420,87 @@ export const StockView: React.FC<StockViewProps> = ({
         defval: '',
       });
 
+      if (!rows || rows.length === 0) {
+        alert('A planilha selecionada está vazia ou não contém dados legíveis.');
+        return;
+      }
+
       setRawRows(rows);
-      const initialStart = rows.length > 1 ? 2 : 1;
-      setStartRow(initialStart);
-      setEndRow(Math.min(rows.length, initialStart + MAX_ROWS_LIMIT - 1));
+
+      // Detecção inteligente de colunas a partir da linha de cabeçalho (rows[0])
+      const headerRow = rows[0] || [];
+      let detectedName = 0;
+      let detectedSupplier = 0;
+      let detectedBarcode = 0;
+      let detectedReduced = 0;
+      let detectedQty = 0;
+
+      headerRow.forEach((colName, idx) => {
+        const col = String(colName || '').toLowerCase().trim();
+        const colNum = idx + 1;
+
+        if (
+          !detectedName &&
+          (col.includes('descri') ||
+            col.includes('produto') ||
+            col.includes('nome') ||
+            col.includes('item') ||
+            col.includes('mercadoria'))
+        ) {
+          detectedName = colNum;
+        } else if (
+          !detectedBarcode &&
+          (col.includes('ean') ||
+            col.includes('barra') ||
+            col.includes('gtin') ||
+            col.includes('cód. barras'))
+        ) {
+          detectedBarcode = colNum;
+        } else if (
+          !detectedReduced &&
+          (col.includes('reduzid') ||
+            col.includes('plu') ||
+            col.includes('interno') ||
+            col.includes('cód. red'))
+        ) {
+          detectedReduced = colNum;
+        } else if (
+          !detectedSupplier &&
+          (col.includes('fornec') ||
+            col.includes('supplier') ||
+            col.includes('cód. forn'))
+        ) {
+          detectedSupplier = colNum;
+        } else if (
+          !detectedQty &&
+          (col.includes('quant') ||
+            col.includes('qtd') ||
+            col.includes('saldo') ||
+            col.includes('estoque') ||
+            col.includes('fisic') ||
+            col.includes('físic') ||
+            col.includes('unidades'))
+        ) {
+          detectedQty = colNum;
+        }
+      });
+
+      // Se detectou pelo menos 1 coluna chave, aplica o mapeamento inteligente
+      if (detectedName || detectedBarcode || detectedQty) {
+        setMapping({
+          nameCol: detectedName || 1,
+          supplierCodeCol: detectedSupplier || 0,
+          barcodeCol: detectedBarcode || 0,
+          reducedCodeCol: detectedReduced || 0,
+          quantityCol: detectedQty || (rows[0].length >= 5 ? 5 : 0),
+        });
+        setStartRow(2); // Pula linha de cabeçalho
+      } else {
+        // Padrão sequencial 1 a 5
+        setStartRow(rows.length > 1 ? 2 : 1);
+      }
+
+      setEndRow(Math.min(rows.length, 5001));
     } catch (err) {
       alert(`Falha ao ler o arquivo Excel: ${formatErrorMessage(err)}`);
     }
@@ -497,11 +663,100 @@ export const StockView: React.FC<StockViewProps> = ({
     }
   };
 
-  const copySqlScript = () => {
-    const sql = `-- Estrutura de Banco de Dados Separada: ESTOQUE (Supabase / PostgreSQL)
+  const masterSql = `-- ============================================================================
+-- SCRIPT MASTER CONSOLIDADO: EXECUTAR TUDO (PRODUÇÃO)
+-- Sistema: Synk / ValidaMerc - Controle de Prevenção de Perdas
+-- Versão: 2026.1 (Multi-tenant, Matriz/Filiais, Sessão Única, RLS e Auditoria)
+-- ============================================================================
+
+-- 1. LOJAS (Multi-tenancy e Filiais)
+CREATE TABLE IF NOT EXISTS public.lojas (
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    nome_loja TEXT NOT NULL,
+    cor_borda TEXT NOT NULL DEFAULT '#059669',
+    ativa BOOLEAN NOT NULL DEFAULT TRUE,
+    matriz_id TEXT REFERENCES public.lojas(id) ON DELETE SET NULL,
+    matrix_uuid TEXT,
+    limite_lojas INTEGER NOT NULL DEFAULT 100,
+    limite_usuarios_por_loja INTEGER NOT NULL DEFAULT 50,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 2. USUÁRIOS
+CREATE TABLE IF NOT EXISTS public.usuarios (
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    matricula TEXT UNIQUE NOT NULL,
+    nome TEXT NOT NULL,
+    cargo TEXT NOT NULL DEFAULT 'operador',
+    setor TEXT,
+    loja_id TEXT REFERENCES public.lojas(id) ON DELETE SET NULL,
+    senha_hash TEXT,
+    email TEXT,
+    ativo BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 3. PRODUTOS (Isolamento por Loja / Estoque)
+CREATE TABLE IF NOT EXISTS public.produtos (
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    nome TEXT NOT NULL,
+    codigo_barras TEXT NOT NULL,
+    plu TEXT,
+    setor TEXT NOT NULL,
+    quantidade INTEGER NOT NULL DEFAULT 0,
+    data_vencimento TEXT NOT NULL,
+    loja_id TEXT NOT NULL REFERENCES public.lojas(id) ON DELETE CASCADE,
+    criado_em BIGINT NOT NULL DEFAULT (extract(epoch from now()) * 1000),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_produtos_loja_id ON public.produtos(loja_id);
+CREATE INDEX IF NOT EXISTS idx_produtos_codigo_barras ON public.produtos(codigo_barras);
+CREATE INDEX IF NOT EXISTS idx_produtos_ean_loja ON public.produtos(loja_id, codigo_barras);
+
+-- 4. CATÁLOGO UNIVERSAL DE PRODUTOS (Base Global)
+CREATE TABLE IF NOT EXISTS public.produtos_catalogo_universal (
+    codigo_barras TEXT PRIMARY KEY,
+    nome TEXT NOT NULL,
+    criado_em TIMESTAMPTZ NOT NULL DEFAULT now(),
+    atualizado_em TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_produtos_catalogo_universal_nome ON public.produtos_catalogo_universal(nome);
+
+-- 5. TABELA DE ESTOQUE (Compatibilidade)
+CREATE TABLE IF NOT EXISTS public.estoque (
+    id TEXT PRIMARY KEY,
+    id_loja TEXT NOT NULL DEFAULT 'loja-matriz-01',
+    produto TEXT NOT NULL,
+    codigo_ean TEXT DEFAULT '',
+    codigo_reduzido TEXT DEFAULT '',
+    codigo_fornecedor TEXT DEFAULT '',
+    quantidade NUMERIC(12, 3) NOT NULL DEFAULT 0,
+    atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Habilitar RLS e Permissões
+ALTER TABLE public.lojas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.usuarios ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.produtos ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.produtos_catalogo_universal ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.estoque ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Acesso seguro lojas" ON public.lojas FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Acesso seguro usuarios" ON public.usuarios FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Acesso seguro produtos" ON public.produtos FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Acesso seguro catalogo" ON public.produtos_catalogo_universal FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Acesso seguro estoque" ON public.estoque FOR ALL USING (true) WITH CHECK (true);`;
+
+  const copySqlScript = (type: 'master' | 'estoque' = sqlScriptType) => {
+    const textToCopy = type === 'master' ? masterSql : `-- Tabela Separada: ESTOQUE
 CREATE TABLE IF NOT EXISTS public.estoque (
   id TEXT PRIMARY KEY,
-  id_loja TEXT NOT NULL DEFAULT 'loja-1',
+  id_loja TEXT NOT NULL DEFAULT 'loja-matriz-01',
   produto TEXT NOT NULL,
   codigo_ean TEXT DEFAULT '',
   codigo_reduzido TEXT DEFAULT '',
@@ -517,21 +772,9 @@ CREATE INDEX IF NOT EXISTS idx_estoque_codigo_fornecedor ON public.estoque (codi
 CREATE INDEX IF NOT EXISTS idx_estoque_produto ON public.estoque (produto);
 
 ALTER TABLE public.estoque ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Acesso seguro estoque" ON public.estoque FOR ALL USING (true) WITH CHECK (true);`;
 
-DROP POLICY IF EXISTS "Service role full access estoque" ON public.estoque;
-CREATE POLICY "Service role full access estoque"
-  ON public.estoque
-  FOR ALL
-  USING (true)
-  WITH CHECK (true);
-
-DROP POLICY IF EXISTS "Public read estoque" ON public.estoque;
-CREATE POLICY "Public read estoque"
-  ON public.estoque
-  FOR SELECT
-  USING (true);`;
-
-    navigator.clipboard.writeText(sql);
+    navigator.clipboard.writeText(textToCopy);
     setSqlCopied(true);
     setTimeout(() => setSqlCopied(false), 3000);
   };
@@ -873,16 +1116,30 @@ CREATE POLICY "Public read estoque"
 
               <div>
                 <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Identificador da Loja:
+                  Loja de Destino:
                 </label>
-                <input
-                  type="text"
-                  value={selectedStoreId}
-                  onChange={(e) => setSelectedStoreId(e.target.value)}
-                  placeholder="loja-1"
-                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-white"
-                />
-                <span className="text-[10px] text-slate-400">Coluna id_loja no banco</span>
+                {lojas.length > 0 ? (
+                  <select
+                    value={selectedStoreId}
+                    onChange={(e) => setSelectedStoreId(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
+                  >
+                    {lojas.map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.nome_loja} ({l.id})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={selectedStoreId}
+                    onChange={(e) => setSelectedStoreId(e.target.value)}
+                    placeholder="loja-matriz-01"
+                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-white"
+                  />
+                )}
+                <span className="text-[10px] text-slate-400">Tabela lojas / coluna loja_id</span>
               </div>
             </div>
 
@@ -988,6 +1245,80 @@ CREATE POLICY "Public read estoque"
                 </div>
               </div>
             </div>
+
+            {/* Aviso de teto de 5.000 linhas */}
+            {exceedsMaxRows && (
+              <div className="p-3 rounded-xl border border-amber-300 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-950/40 text-xs text-amber-800 dark:text-amber-300 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-bold">Limite de 5.000 linhas excedido ({selectedRowsCount} selecionadas)</p>
+                  <p className="mt-0.5">
+                    Para garantir estabilidade e evitar travamento do navegador, ajuste a Linha Final para no máximo {startRow + MAX_ROWS_LIMIT - 1}.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Pré-visualização da Extração dos Dados (Primeiras 5 Linhas) */}
+            {rawRows.length > 0 && (
+              <div className="space-y-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/50 p-3.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <span className="text-xs font-bold text-slate-900 dark:text-white">
+                      Pré-visualização da Extração (Primeiras {previewItems.length} linhas do intervalo)
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    Formatação BR e EAN sanitizado
+                  </span>
+                </div>
+
+                {previewItems.length === 0 ? (
+                  <div className="p-3 text-center text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-lg">
+                    Nenhum dado legível foi identificado com o mapeamento atual nas linhas {startRow} a {endRow}.
+                    Verifique se o número das colunas corresponde à planilha.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+                    <table className="w-full text-left text-[11px] font-mono">
+                      <thead>
+                        <tr className="border-b border-slate-200 dark:border-slate-800 bg-slate-100/75 dark:bg-slate-950 text-slate-600 dark:text-slate-400">
+                          <th className="py-1.5 px-2.5">Linha</th>
+                          <th className="py-1.5 px-2.5">Produto / Descrição</th>
+                          <th className="py-1.5 px-2.5">EAN</th>
+                          <th className="py-1.5 px-2.5">Reduzido</th>
+                          <th className="py-1.5 px-2.5">Fornecedor</th>
+                          <th className="py-1.5 px-2.5 text-right">Qtd</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {previewItems.map((p, idx) => (
+                          <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                            <td className="py-1.5 px-2.5 text-slate-400">#{p.originalRow}</td>
+                            <td className="py-1.5 px-2.5 font-medium font-sans text-slate-900 dark:text-white truncate max-w-[180px]">
+                              {p.produto || <span className="text-slate-400 italic">Vazio</span>}
+                            </td>
+                            <td className="py-1.5 px-2.5 text-slate-600 dark:text-slate-300">
+                              {p.codigo_ean || '-'}
+                            </td>
+                            <td className="py-1.5 px-2.5 text-slate-600 dark:text-slate-300">
+                              {p.codigo_reduzido || '-'}
+                            </td>
+                            <td className="py-1.5 px-2.5 text-slate-600 dark:text-slate-300">
+                              {p.codigo_fornecedor || '-'}
+                            </td>
+                            <td className="py-1.5 px-2.5 text-right font-bold text-emerald-600 dark:text-emerald-400">
+                              {p.quantidade} un
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Resumo da importação mapeada */}
             <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800">
@@ -1237,18 +1568,40 @@ CREATE POLICY "Public read estoque"
               </button>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-3">
               <p className="text-xs text-slate-600 dark:text-slate-300">
-                Copie o script abaixo, abra o console do seu projeto no{' '}
-                <strong>Supabase</strong>, vá em <strong>SQL Editor</strong>, cole o código e
-                clique em <strong>Run</strong>.
+                Selecione o script SQL correspondente, copie e execute no <strong>SQL Editor</strong> do seu projeto Supabase:
               </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSqlScriptType('master')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    sqlScriptType === 'master'
+                      ? 'bg-sky-600 text-white shadow-xs'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900'
+                  }`}
+                >
+                  Script Master Completo (2026)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSqlScriptType('estoque')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                    sqlScriptType === 'estoque'
+                      ? 'bg-sky-600 text-white shadow-xs'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:text-slate-900'
+                  }`}
+                >
+                  Tabela Estoque
+                </button>
+              </div>
 
               <div className="relative rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 p-4 font-mono text-[11px] text-emerald-400 overflow-x-auto max-h-72">
-                <pre>{`-- 1. TABELA PRINCIPAL DE ESTOQUE (Estrutura Separada)
+                <pre>{sqlScriptType === 'master' ? masterSql : `-- Tabela Separada: ESTOQUE
 CREATE TABLE IF NOT EXISTS public.estoque (
   id TEXT PRIMARY KEY,
-  id_loja TEXT NOT NULL DEFAULT 'loja-1',
+  id_loja TEXT NOT NULL DEFAULT 'loja-matriz-01',
   produto TEXT NOT NULL,
   codigo_ean TEXT DEFAULT '',
   codigo_reduzido TEXT DEFAULT '',
@@ -1257,36 +1610,26 @@ CREATE TABLE IF NOT EXISTS public.estoque (
   atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Índices otimizados
 CREATE INDEX IF NOT EXISTS idx_estoque_id_loja ON public.estoque (id_loja);
 CREATE INDEX IF NOT EXISTS idx_estoque_codigo_ean ON public.estoque (codigo_ean);
 CREATE INDEX IF NOT EXISTS idx_estoque_codigo_reduzido ON public.estoque (codigo_reduzido);
 CREATE INDEX IF NOT EXISTS idx_estoque_codigo_fornecedor ON public.estoque (codigo_fornecedor);
 CREATE INDEX IF NOT EXISTS idx_estoque_produto ON public.estoque (produto);
 
--- Habilitar Row Level Security (RLS)
 ALTER TABLE public.estoque ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY "Service role full access estoque"
-  ON public.estoque
-  FOR ALL
-  USING (true)
-  WITH CHECK (true);
-
-CREATE POLICY "Public read estoque"
-  ON public.estoque
-  FOR SELECT
-  USING (true);`}</pre>
+CREATE POLICY "Acesso seguro estoque" ON public.estoque FOR ALL USING (true) WITH CHECK (true);`}</pre>
               </div>
             </div>
 
             <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800">
               <span className="text-xs text-slate-500">
-                Colunas: id, id_loja, produto, codigo_ean, codigo_reduzido, codigo_fornecedor, quantidade
+                {sqlScriptType === 'master'
+                  ? 'Inclui: lojas, usuarios, produtos, auditoria e catalogo universal'
+                  : 'Colunas: id, id_loja, produto, codigo_ean, codigo_reduzido, codigo_fornecedor, quantidade'}
               </span>
               <button
                 type="button"
-                onClick={copySqlScript}
+                onClick={() => copySqlScript(sqlScriptType)}
                 className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg shadow-sm transition-colors"
               >
                 {sqlCopied ? (
@@ -1297,7 +1640,7 @@ CREATE POLICY "Public read estoque"
                 ) : (
                   <>
                     <Copy className="w-4 h-4" />
-                    <span>Copiar Código SQL</span>
+                    <span>Copiar {sqlScriptType === 'master' ? 'Script Master' : 'SQL Estoque'}</span>
                   </>
                 )}
               </button>

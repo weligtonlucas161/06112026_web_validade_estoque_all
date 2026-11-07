@@ -10,9 +10,13 @@ import { GoogleGenAI, Type } from '@google/genai';
 import type {
   AppNotification,
   AuditSession,
+  CatalogoUniversalItem,
   EstoqueItem,
+  Loja,
   ProductBatch,
+  Produto,
   PushSettings,
+  Usuario,
 } from './src/types';
 
 const PORT = 3000;
@@ -20,6 +24,10 @@ const DATA_DIR = path.resolve(process.cwd(), 'data');
 const STORE_PATH = path.join(DATA_DIR, 'store.json');
 
 interface StoreData {
+  lojas: Loja[];
+  produtos: Produto[];
+  catalogo_universal: CatalogoUniversalItem[];
+  usuarios: Usuario[];
   products: ProductBatch[];
   estoque: EstoqueItem[];
   audits: AuditSession[];
@@ -265,9 +273,58 @@ function createInitialStore(): StoreData {
     },
   ];
 
+  const defaultLojaId = 'loja-matriz-01';
+  const lojas: Loja[] = [
+    {
+      id: defaultLojaId,
+      nome_loja: 'Loja Matriz Central',
+      cor_borda: '#059669',
+      ativa: true,
+      limite_lojas: 100,
+      limite_usuarios_por_loja: 50,
+      created_at: now,
+      updated_at: now,
+    },
+  ];
+
+  const produtos: Produto[] = products.map((p) => ({
+    id: p.id,
+    nome: p.name,
+    codigo_barras: p.barcode,
+    plu: p.reducedCode || null,
+    setor: p.category || 'Mercearia',
+    quantidade: p.quantity,
+    data_vencimento: p.expirationDate,
+    loja_id: defaultLojaId,
+    criado_em: Date.now(),
+    created_at: p.createdAt,
+    updated_at: p.createdAt,
+  }));
+
+  const catalogo_universal: CatalogoUniversalItem[] = products.map((p) => ({
+    codigo_barras: p.barcode,
+    nome: p.name,
+    criado_em: now,
+    atualizado_em: now,
+  }));
+
+  const usuarios: Usuario[] = [
+    {
+      id: 'usr_adm_global_001',
+      matricula: '111111',
+      nome: 'Administrador do Sistema (SaaS)',
+      cargo: 'adm',
+      setor: 'Todos',
+      loja_id: null,
+      ativo: true,
+      created_at: now,
+      updated_at: now,
+    },
+  ];
+
   const estoque: EstoqueItem[] = products.map((p, idx) => ({
     id: p.id,
-    id_loja: 'loja-1',
+    id_loja: defaultLojaId,
     produto: p.name,
     codigo_ean: p.barcode || '',
     codigo_reduzido: p.reducedCode || String(1001 + idx),
@@ -278,6 +335,10 @@ function createInitialStore(): StoreData {
   }));
 
   return {
+    lojas,
+    produtos,
+    catalogo_universal,
+    usuarios,
     products,
     estoque,
     audits,
@@ -306,10 +367,69 @@ function loadStore(): StoreData {
   try {
     const raw = fs.readFileSync(STORE_PATH, 'utf-8');
     const parsed = JSON.parse(raw) as StoreData;
+
+    const defaultLojaId = 'loja-matriz-01';
+
+    if (!Array.isArray(parsed.lojas) || parsed.lojas.length === 0) {
+      parsed.lojas = [
+        {
+          id: defaultLojaId,
+          nome_loja: 'Loja Matriz Central',
+          cor_borda: '#059669',
+          ativa: true,
+          limite_lojas: 100,
+          limite_usuarios_por_loja: 50,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ];
+    }
+
+    if (!Array.isArray(parsed.produtos)) {
+      parsed.produtos = (parsed.products || []).map((p) => ({
+        id: p.id,
+        nome: p.name,
+        codigo_barras: p.barcode,
+        plu: p.reducedCode || null,
+        setor: p.category || 'Mercearia',
+        quantidade: p.quantity,
+        data_vencimento: p.expirationDate,
+        loja_id: defaultLojaId,
+        criado_em: Date.now(),
+        created_at: p.createdAt,
+        updated_at: p.createdAt,
+      }));
+    }
+
+    if (!Array.isArray(parsed.catalogo_universal)) {
+      parsed.catalogo_universal = (parsed.products || []).map((p) => ({
+        codigo_barras: p.barcode,
+        nome: p.name,
+        criado_em: new Date().toISOString(),
+        atualizado_em: new Date().toISOString(),
+      }));
+    }
+
+    if (!Array.isArray(parsed.usuarios)) {
+      parsed.usuarios = [
+        {
+          id: 'usr_adm_global_001',
+          matricula: '111111',
+          nome: 'Administrador do Sistema (SaaS)',
+          cargo: 'adm',
+          setor: 'Todos',
+          loja_id: null,
+          ativo: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ];
+    }
+
     if (!Array.isArray(parsed.estoque)) {
       parsed.estoque = (parsed.products || []).map((p, idx) => ({
         id: p.id,
-        id_loja: 'loja-1',
+        id_loja: defaultLojaId,
         produto: p.name,
         codigo_ean: p.barcode || '',
         codigo_reduzido: p.reducedCode || String(1001 + idx),
@@ -667,10 +787,113 @@ async function startServer() {
   });
 
   // ============================================================================
-  // ROTAS SEPARADAS DE ESTOQUE (id, id_loja, produto, codigo_ean, codigo_reduzido, codigo_fornecedor, quantidade)
+  // ROTAS ADAPTADAS AO NOVO BANCO DE DADOS (Synk / ValidaMerc 2026 Master)
+  // Tabelas: lojas, produtos, produtos_catalogo_universal, estoque
   // ============================================================================
 
-  // Obter itens da tabela separada de estoque
+  // Obter lista de lojas cadastradas
+  app.get('/api/lojas', (req, res) => {
+    store = loadStore();
+    res.json({
+      ok: true,
+      total: store.lojas.length,
+      lojas: store.lojas,
+    });
+  });
+
+  // Criar ou atualizar loja
+  app.post('/api/lojas', async (req, res) => {
+    store = loadStore();
+    const body = req.body || {};
+    const now = new Date().toISOString();
+    const id = body.id || `loja-${Date.now()}`;
+    const nome_loja = String(body.nome_loja || 'Nova Filial').trim();
+    const cor_borda = String(body.cor_borda || '#059669').trim();
+
+    const existingIdx = store.lojas.findIndex((l) => l.id === id);
+    const lojaObj: Loja = {
+      id,
+      nome_loja,
+      cor_borda,
+      ativa: body.ativa !== false,
+      matriz_id: body.matriz_id || null,
+      matrix_uuid: body.matrix_uuid || null,
+      limite_lojas: Number(body.limite_lojas) || 100,
+      limite_usuarios_por_loja: Number(body.limite_usuarios_por_loja) || 50,
+      cnpj: body.cnpj || undefined,
+      endereco: body.endereco || undefined,
+      telefone: body.telefone || undefined,
+      created_at: existingIdx !== -1 ? store.lojas[existingIdx].created_at : now,
+      updated_at: now,
+    };
+
+    if (existingIdx !== -1) {
+      store.lojas[existingIdx] = lojaObj;
+    } else {
+      store.lojas.push(lojaObj);
+    }
+    saveStore(store);
+
+    // Sincroniza loja com Supabase public.lojas se configurado
+    const { raw } = getEffectiveIntegrations();
+    if (raw.supabaseUrl && raw.supabaseKey) {
+      try {
+        await fetch(`${raw.supabaseUrl}/rest/v1/lojas?on_conflict=id`, {
+          method: 'POST',
+          headers: {
+            apikey: raw.supabaseKey,
+            Authorization: `Bearer ${raw.supabaseKey}`,
+            'Content-Type': 'application/json',
+            Prefer: 'resolution=merge-duplicates',
+          },
+          body: JSON.stringify([
+            {
+              id: lojaObj.id,
+              nome_loja: lojaObj.nome_loja,
+              cor_borda: lojaObj.cor_borda,
+              ativa: lojaObj.ativa,
+              matriz_id: lojaObj.matriz_id,
+              limite_lojas: lojaObj.limite_lojas,
+              limite_usuarios_por_loja: lojaObj.limite_usuarios_por_loja,
+              updated_at: now,
+            },
+          ]),
+          signal: AbortSignal.timeout(4000),
+        });
+      } catch {
+        // Ignora erro de rede mantendo persistência local
+      }
+    }
+
+    res.status(201).json({ ok: true, loja: lojaObj });
+  });
+
+  // Consulta do Catálogo Universal de Produtos por Código de Barras
+  app.get('/api/catalogo-universal/:barcode', (req, res) => {
+    store = loadStore();
+    const barcode = String(req.params.barcode).trim();
+    const match = store.catalogo_universal.find((c) => c.codigo_barras === barcode);
+    if (match) {
+      res.json({ ok: true, found: true, item: match });
+    } else {
+      res.json({ ok: true, found: false });
+    }
+  });
+
+  // Obter o script SQL Master Consolidado
+  app.get(['/api/estoque/schema.sql', '/api/supabase/master-schema.sql'], (_req, res) => {
+    const masterPath = path.resolve(process.cwd(), 'supabase', '00_EXECUTAR_TUDO_MASTER.sql');
+    const fallbackPath = path.resolve(process.cwd(), 'supabase', 'schema.sql');
+    const target = fs.existsSync(masterPath) ? masterPath : fallbackPath;
+    if (fs.existsSync(target)) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.send(fs.readFileSync(target, 'utf-8'));
+    } else {
+      res.status(404).send('-- Script SQL master não encontrado');
+    }
+  });
+
+  // Obter itens de estoque / produtos
   app.get('/api/estoque', (req, res) => {
     store = loadStore();
     const idLoja = req.query.id_loja ? String(req.query.id_loja).trim() : '';
@@ -684,27 +907,16 @@ async function startServer() {
     });
   });
 
-  // Obter o script SQL oficial do Supabase para criar a estrutura separada
-  app.get('/api/estoque/schema.sql', (_req, res) => {
-    const schemaPath = path.resolve(process.cwd(), 'supabase', 'schema.sql');
-    if (fs.existsSync(schemaPath)) {
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      res.send(fs.readFileSync(schemaPath, 'utf-8'));
-    } else {
-      res.status(404).send('-- supabase/schema.sql não encontrado');
-    }
-  });
-
   // Criar ou atualizar item individual de estoque
   app.post('/api/estoque', (req, res) => {
     store = loadStore();
     const body = req.body || {};
     const now = new Date().toISOString();
     const id = body.id || `est-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const id_loja = String(body.id_loja || 'loja-1').trim();
-    const produto = String(body.produto || body.name || '').trim();
-    const codigo_ean = String(body.codigo_ean || body.barcode || '').trim();
-    const codigo_reduzido = String(body.codigo_reduzido || body.reducedCode || '').trim();
+    const id_loja = String(body.id_loja || body.loja_id || 'loja-matriz-01').trim();
+    const produto = String(body.produto || body.nome || body.name || '').trim();
+    const codigo_ean = String(body.codigo_ean || body.codigo_barras || body.barcode || '').trim();
+    const codigo_reduzido = String(body.codigo_reduzido || body.plu || body.reducedCode || '').trim();
     const codigo_fornecedor = String(body.codigo_fornecedor || body.supplierCode || '').trim();
     const quantidade = Number(body.quantidade ?? body.quantity ?? 0) || 0;
 
@@ -745,16 +957,59 @@ async function startServer() {
     store = loadStore();
     const id = req.params.id;
     store.estoque = store.estoque.filter((item) => item.id !== id);
+    store.produtos = store.produtos.filter((item) => item.id !== id);
+    store.products = store.products.filter((item) => item.id !== id);
     saveStore(store);
     res.json({ ok: true });
   });
 
-  // Importação de estoque em blocos (chunks de 10) com suporte ao Supabase e banco local
+function parseQuantityBR(raw: unknown): number {
+  if (typeof raw === 'number') {
+    return isNaN(raw) ? 0 : raw;
+  }
+  if (!raw) return 0;
+  let str = String(raw).trim();
+  str = str.replace(/[a-zA-Z]/g, '').trim();
+  if (!str) return 0;
+
+  if (str.includes('.') && str.includes(',')) {
+    str = str.replace(/\./g, '').replace(',', '.');
+  } else if (str.includes(',')) {
+    str = str.replace(',', '.');
+  } else if (str.includes('.')) {
+    const parts = str.split('.');
+    if (parts.length === 2 && parts[1].length === 3 && Number(parts[0]) > 0) {
+      str = parts[0] + parts[1];
+    }
+  }
+
+  const num = Number(str);
+  return isNaN(num) ? 0 : Math.round(num * 1000) / 1000;
+}
+
+function sanitizeBarcode(val: unknown): string {
+  if (val === undefined || val === null) return '';
+  let str = String(val).trim();
+  if (!str) return '';
+
+  if (/^[0-9.]+[eE][+-]?[0-9]+$/.test(str)) {
+    const num = Number(str);
+    if (!isNaN(num) && Number.isFinite(num)) {
+      str = BigInt(Math.round(num)).toString();
+    }
+  }
+
+  str = str.replace(/\.0+$/, '');
+  str = str.replace(/\s+/g, '');
+  return str;
+}
+
+  // Importação de estoque em blocos (chunks de 10) com suporte ao novo schema Supabase (produtos e catalogo universal)
   app.post('/api/estoque/import', async (req, res) => {
     try {
       store = loadStore();
       const items = req.body?.items;
-      const defaultLoja = String(req.body?.id_loja || 'loja-1').trim();
+      const defaultLoja = String(req.body?.id_loja || req.body?.loja_id || 'loja-matriz-01').trim();
 
       if (!Array.isArray(items) || items.length === 0) {
         res.status(400).json({
@@ -765,6 +1020,7 @@ async function startServer() {
       }
 
       const now = new Date().toISOString();
+      const defaultExpiry = addDaysISO(30);
       let inserted = 0;
       let updated = 0;
       const affectedEstoque: EstoqueItem[] = [];
@@ -776,7 +1032,7 @@ async function startServer() {
 
       store.estoque.forEach((item, idx) => {
         idMap.set(item.id, idx);
-        const loja = item.id_loja || 'loja-1';
+        const loja = item.id_loja || defaultLoja;
         if (item.codigo_ean) eanMap.set(`${loja}:${item.codigo_ean.trim()}`, idx);
         if (item.codigo_reduzido) reducedMap.set(`${loja}:${item.codigo_reduzido.trim()}`, idx);
       });
@@ -785,12 +1041,12 @@ async function startServer() {
         const row = items[i];
         if (!row) continue;
 
-        const produto = String(row.produto || row.name || '').trim();
-        const codigo_ean = String(row.codigo_ean || row.barcode || '').trim();
-        const codigo_reduzido = String(row.codigo_reduzido || row.reducedCode || '').trim();
-        const codigo_fornecedor = String(row.codigo_fornecedor || row.supplierCode || '').trim();
-        const quantidade = Number(row.quantidade ?? row.quantity ?? 0) || 0;
-        const id_loja = String(row.id_loja || defaultLoja || 'loja-1').trim();
+        const produto = String(row.produto || row.nome || row.name || '').trim();
+        const codigo_ean = sanitizeBarcode(row.codigo_ean || row.codigo_barras || row.barcode || '');
+        const codigo_reduzido = String(row.codigo_reduzido || row.plu || row.reducedCode || '').replace(/\.0+$/, '').trim();
+        const codigo_fornecedor = String(row.codigo_fornecedor || row.supplierCode || '').replace(/\.0+$/, '').trim();
+        const quantidade = parseQuantityBR(row.quantidade ?? row.quantity ?? 0);
+        const id_loja = String(row.id_loja || row.loja_id || defaultLoja).trim();
 
         if (!produto && !codigo_ean && !codigo_reduzido) continue;
 
@@ -834,16 +1090,58 @@ async function startServer() {
           inserted++;
           affectedEstoque.push(newItem);
 
-          // Atualiza mapas com a nova posição
           idMap.set(newId, 0);
           if (codigo_ean) eanMap.set(`${id_loja}:${codigo_ean}`, 0);
           if (codigo_reduzido) reducedMap.set(`${id_loja}:${codigo_reduzido}`, 0);
         }
+
+        // Alimenta o Catálogo Universal de Produtos
+        if (codigo_ean && produto) {
+          const catIdx = store.catalogo_universal.findIndex((c) => c.codigo_barras === codigo_ean);
+          if (catIdx !== -1) {
+            store.catalogo_universal[catIdx].nome = produto;
+            store.catalogo_universal[catIdx].atualizado_em = now;
+          } else {
+            store.catalogo_universal.push({
+              codigo_barras: codigo_ean,
+              nome: produto,
+              criado_em: now,
+              atualizado_em: now,
+            });
+          }
+        }
       }
 
-      // Sincroniza também com store.products para que Validade e Auditorias permaneçam consistentes
-      const defaultExpiry = addDaysISO(30);
+      // Sincroniza também com store.produtos e store.products
       for (const item of affectedEstoque) {
+        // store.produtos (Novo Schema)
+        const prodIdx = store.produtos.findIndex(
+          (p) =>
+            (item.codigo_ean && p.codigo_barras === item.codigo_ean) ||
+            (item.codigo_reduzido && p.plu === item.codigo_reduzido) ||
+            p.id === item.id
+        );
+        if (prodIdx !== -1) {
+          store.produtos[prodIdx].nome = item.produto || store.produtos[prodIdx].nome;
+          store.produtos[prodIdx].quantidade = item.quantidade;
+          store.produtos[prodIdx].updated_at = now;
+        } else {
+          store.produtos.unshift({
+            id: item.id,
+            nome: item.produto,
+            codigo_barras: item.codigo_ean || item.codigo_reduzido || `IMP-${Date.now()}`,
+            plu: item.codigo_reduzido || null,
+            setor: 'Mercearia',
+            quantidade: item.quantidade,
+            data_vencimento: defaultExpiry,
+            loja_id: item.id_loja || defaultLoja,
+            criado_em: Date.now(),
+            created_at: now,
+            updated_at: now,
+          });
+        }
+
+        // store.products (Controle de Validade e Auditorias)
         const pIdx = store.products.findIndex(
           (p) =>
             (item.codigo_ean && p.barcode === item.codigo_ean) ||
@@ -882,25 +1180,27 @@ async function startServer() {
 
       saveStore(store);
 
-      // Sincronização segura com Supabase na tabela separada 'estoque'
+      // Sincronização segura com o novo schema Supabase (public.produtos e public.produtos_catalogo_universal)
       let supabaseSynced = false;
       let supabaseMessage = '';
       const { raw } = getEffectiveIntegrations();
       if (raw.supabaseUrl && raw.supabaseKey && affectedEstoque.length > 0) {
         try {
-          const sbPayload = affectedEstoque.map((e) => ({
+          // 1. Tabela public.produtos do novo schema
+          const sbProdutosPayload = affectedEstoque.map((e) => ({
             id: e.id,
-            id_loja: e.id_loja,
-            produto: e.produto,
-            codigo_ean: e.codigo_ean || '',
-            codigo_reduzido: e.codigo_reduzido || '',
-            codigo_fornecedor: e.codigo_fornecedor || '',
+            nome: e.produto,
+            codigo_barras: e.codigo_ean || e.codigo_reduzido || `IMP-${Date.now()}`,
+            plu: e.codigo_reduzido || null,
+            setor: 'Mercearia',
             quantidade: e.quantidade,
-            atualizado_em: now,
+            data_vencimento: defaultExpiry,
+            loja_id: e.id_loja || defaultLoja,
+            updated_at: now,
           }));
 
-          const sbRes = await fetch(
-            `${raw.supabaseUrl}/rest/v1/estoque?on_conflict=id`,
+          const resProd = await fetch(
+            `${raw.supabaseUrl}/rest/v1/produtos?on_conflict=id`,
             {
               method: 'POST',
               headers: {
@@ -909,23 +1209,84 @@ async function startServer() {
                 'Content-Type': 'application/json',
                 Prefer: 'resolution=merge-duplicates',
               },
-              body: JSON.stringify(sbPayload),
+              body: JSON.stringify(sbProdutosPayload),
               signal: AbortSignal.timeout(6000),
             }
           );
 
-          if (sbRes.ok) {
+          // 2. Tabela public.produtos_catalogo_universal
+          const sbUniversal = affectedEstoque
+            .filter((e) => e.codigo_ean && e.produto)
+            .map((e) => ({
+              codigo_barras: e.codigo_ean.trim(),
+              nome: e.produto.trim(),
+              atualizado_em: now,
+            }));
+
+          if (sbUniversal.length > 0) {
+            try {
+              await fetch(
+                `${raw.supabaseUrl}/rest/v1/produtos_catalogo_universal?on_conflict=codigo_barras`,
+                {
+                  method: 'POST',
+                  headers: {
+                    apikey: raw.supabaseKey,
+                    Authorization: `Bearer ${raw.supabaseKey}`,
+                    'Content-Type': 'application/json',
+                    Prefer: 'resolution=merge-duplicates',
+                  },
+                  body: JSON.stringify(sbUniversal),
+                  signal: AbortSignal.timeout(4000),
+                }
+              );
+            } catch {
+              // Non-blocking
+            }
+          }
+
+          if (resProd.ok) {
             supabaseSynced = true;
-            supabaseMessage = 'Sincronizado com tabela estoque no Supabase.';
+            supabaseMessage = 'Sincronizado com tabela produtos no Supabase.';
           } else {
-            const errBody = await sbRes.text();
-            console.warn('Aviso Supabase estoque:', sbRes.status, errBody);
-            supabaseSynced = false;
-            supabaseMessage = `Supabase retornou HTTP ${sbRes.status}. Verifique se a tabela 'estoque' foi criada com supabase/schema.sql.`;
+            // Tenta fallback na tabela legada/separada estoque
+            try {
+              const sbEstoquePayload = affectedEstoque.map((e) => ({
+                id: e.id,
+                id_loja: e.id_loja,
+                produto: e.produto,
+                codigo_ean: e.codigo_ean || '',
+                codigo_reduzido: e.codigo_reduzido || '',
+                codigo_fornecedor: e.codigo_fornecedor || '',
+                quantidade: e.quantidade,
+                atualizado_em: now,
+              }));
+
+              const resEst = await fetch(
+                `${raw.supabaseUrl}/rest/v1/estoque?on_conflict=id`,
+                {
+                  method: 'POST',
+                  headers: {
+                    apikey: raw.supabaseKey,
+                    Authorization: `Bearer ${raw.supabaseKey}`,
+                    'Content-Type': 'application/json',
+                    Prefer: 'resolution=merge-duplicates',
+                  },
+                  body: JSON.stringify(sbEstoquePayload),
+                  signal: AbortSignal.timeout(4000),
+                }
+              );
+              supabaseSynced = resEst.ok;
+              supabaseMessage = resEst.ok
+                ? 'Sincronizado com tabela estoque no Supabase.'
+                : 'Salvo localmente. Execute 00_EXECUTAR_TUDO_MASTER.sql no Supabase.';
+            } catch {
+              supabaseSynced = false;
+              supabaseMessage = 'Salvo localmente. Supabase inacessível.';
+            }
           }
         } catch {
           supabaseSynced = false;
-          supabaseMessage = 'Supabase inacessível no momento. Gravado com sucesso no banco local.';
+          supabaseMessage = 'Salvo localmente com segurança.';
         }
       }
 
